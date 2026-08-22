@@ -9,7 +9,14 @@
 #
 # VPS com Cloudflare Tunnel:
 # - docker compose --profile cloudflare up -d --build
+#
+# Nome do projeto/stack (é o que painéis como o da Hostinger mostram na lista
+# de projetos): controlado só aqui, em "name:". Trocar isso não renomeia
+# containers já criados — veja docs/deploy-rebranding.md para o passo a passo
+# de recriar a stack no servidor com o novo nome.
 # ============================================================
+
+name: admmendes-rotas
 
 services:
   # --- Túnel Cloudflare: única porta de entrada pública ---
@@ -253,9 +260,17 @@ networks:
     driver: bridge
 
 volumes:
+  # Nomes fixos (não seguem o nome do projeto/stack): assim, trocar "name:"
+  # acima nunca troca de volume por baixo nem arrisca perder dados existentes.
   postgres_data:
+    name: admmendes_postgres_data
   redis_data:
+    name: admmendes_redis_data
   minio_data:
+    name: admmendes_minio_data
   caddy_data:
+    name: admmendes_caddy_data
   caddy_config:
+    name: admmendes_caddy_config
   ollama_data:
+    name: admmendes_ollama_data
