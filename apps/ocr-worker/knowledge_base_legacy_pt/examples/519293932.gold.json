@@ -1,0 +1,34 @@
+{
+  "origem": null,
+  "origem_morada": null,
+  "transportadora": "efectivo: Remolque: * :0000XXX Matrículas; O000XKX, DNI Chóter: REC Natiuraleza de lã Mercanéia: PRODUCTO-A'TEMPERATURA-CONTROLADA: -OBLIG/ 4º Ambiénto: DESTINO FENTR HORA TEMP.'C: PESO PALÉS IBUJA 2 LUCKYVISION UNIPESSOAL,; LDA 08/06/2026: 5:32i Amb: «231422 Kg “285 Par no o RUA AFONSO DE ALBUQUERQUE 19: : e inha «Lisboa [Distrito] im 2780307. . . . A UTKYVISIONUNIPESSO. WB/08/2026: 15:32: Amb - amazko: 285Pat TUGAL LIDLECIA LOURES oBiosmoza: sogido- A TESZOKO 3,20 Pal | 7 -2050:306 + Azambujã'» E “82670566 » LUTO hoo a fist aoka: :320 Pal DLECIALOURES: meimBragas: “0,74 Pal. | “2: FRUSTOCK FOOD =2050-308 Azambuja» RUA CASAL NOVO QUINTA SINTRA->2710-023 2 rrRUSTOCK» FODD SERVICE “SA: WB/QB202: iam 4 ass2e Kg Qua Pal Josjn6/2026: EM 4 453,28 Kg a [Distrito] DR Pal FRUSTOCIK-DISTRIBUIÇÃO AL: DB/06/2026: “08:00: Amb. 3ttis kg RUA DO CASAL NOVO\", Q! N = 1000-c Lisboa.» Lisboa [Distr fto] “FRUSTOCK-DISTRIBUIÇÃO Al: “038 Pal ôeido\" Amb. ETERULSA — 08/06/2026: “oB;00 : AFIADA KG \"448 Pal. € 2 LIDL LOURES ida Sm Q M&P. inha - Lisbóa [Distrito] ;a1,2670466 «Louras » Lisboa [Diatiito)",
+  "matricula": null,
+  "natureza": null,
+  "data_carga": null,
+  "hora_carga": null,
+  "codigo_ut": "519293932",
+  "tipo_documento": "MANIFIESTO",
+  "destinos": [
+    {
+      "sequencia": 1,
+      "origem": null,
+      "nome": "MANIFIESTO Focha y Hora de Carga 'B jun; 2026 5:45: Podiá acudir.hasta 30. minutos antes do la hora de: Berg código UT 519293932 Transportista:. CI Flefectivor Transportista efectivo: Remolque: * :0000XXX Matrículas; O000XKX, DNI Chóter: REC Natiuraleza de lã Mercanéia: PRODUCTO-A'TEMPERATURA-CONTROLADA: -OBLIG/ 4º Ambiénto: DESTINO FENTR HORA TEMP.'C: PESO PALÉS IBUJA 2 LUCKYVISION UNIPESSOAL,; LDA",
+      "morada": null,
+      "codigo_postal": null,
+      "cidade": null,
+      "data_limite": "2026-06-08",
+      "hora_limite": "15:32",
+      "temperatura": "Ambiente",
+      "peso_kg": 453.28,
+      "pales": 3.2,
+      "pedido": "-2050 / 82670566 / DLECIALOURES / FRUSTOCK / 2050-308 / CASAL / QUINTA / SINTRA- / 2710-023 / RUSTOCK / SERVICE / QB202 / FRUSTOCIK-DISTRIBUI / CASAL / 1000- / FRUSTOCK-DISTRIBUI / ETERULSA / AFIADA / LOURES / 2670466",
+      "fornecedor": null,
+      "confianca": 0.46
+    }
+  ],
+  "confianca_ocr": 0.46,
+  "necessita_revisao": true,
+  "paginas_consideradas": [
+    1
+  ]
+}

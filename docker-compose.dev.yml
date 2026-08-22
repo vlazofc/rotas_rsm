@@ -1,0 +1,35 @@
+# ============================================================
+# Override de DESENVOLVIMENTO
+# Uso: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Expõe portas localmente e roda a API com reload.
+# NÃO use este arquivo em produção.
+# ============================================================
+
+services:
+  cloudflared:
+    profiles: ["disabled"]   # não sobe o túnel em dev
+
+  proxy:
+    ports:
+      - "8088:80"            # http://localhost:8088
+
+  api:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./apps/api:/app
+    ports:
+      - "8000:8000"          # http://localhost:8000/docs
+
+  postgres:
+    ports:
+      - "5433:5432"          # porta local 5433 (5432 ocupada pelo PostgreSQL local do Windows)
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  minio:
+    ports:
+      - "9000:9000"
+      - "9001:9001"          # console MinIO http://localhost:9001

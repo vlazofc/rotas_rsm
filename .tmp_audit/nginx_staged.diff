@@ -1,0 +1,14 @@
+diff --git a/apps/web/nginx.conf b/apps/web/nginx.conf
+index ccdb35b..e82838f 100644
+--- a/apps/web/nginx.conf
++++ b/apps/web/nginx.conf
+@@ -20,7 +20,7 @@ server {
+     # Tiles locais do mapa. Monte ou copie os arquivos em /usr/share/nginx/html/tiles/{z}/{x}/{y}.png.
+     location /tiles/ {
+         try_files $uri =404;
+-        expires 30d;
+-        add_header Cache-Control "public, max-age=2592000, immutable";
++        expires 1d;
++        add_header Cache-Control "public, max-age=86400";
+     }
+ }

@@ -1,0 +1,33 @@
+# Roteador interno. O Cloudflare Tunnel entrega o hostname público para este
+# proxy em http://proxy:80; aqui distribuímos tudo por path no mesmo domínio.
+
+:80 {
+	encode gzip zstd
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+	handle /docs* {
+		reverse_proxy api:8000
+	}
+	handle /openapi.json {
+		reverse_proxy api:8000
+	}
+	handle /health {
+		reverse_proxy api:8000
+	}
+
+	handle /comprovantes/* {
+		reverse_proxy minio:9000
+	}
+	handle /manifestos/* {
+		reverse_proxy minio:9000
+	}
+	handle /custom/* {
+		reverse_proxy minio:9000
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+}

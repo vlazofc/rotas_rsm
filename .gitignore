@@ -1,0 +1,36 @@
+# Segredos
+.env
+*.env.local
+cloudflare.txt
+
+# Backups e dados
+/backups/
+/test-artifacts/
+*.dump
+*.sql.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Web
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+*.log
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml

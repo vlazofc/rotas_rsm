@@ -1,0 +1,10 @@
+{
+  "codigo_ut": "",
+  "data_carga": "",
+  "hora_carga": "",
+  "origem": "",
+  "destinos": [],
+  "portagem_ida": null,
+  "portagem_volta": null,
+  "km_total": null
+}

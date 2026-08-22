@@ -1,0 +1,876 @@
+diff --git a/apps/web/src/pages/Config.tsx b/apps/web/src/pages/Config.tsx
+index 3b95438..b4632ee 100644
+--- a/apps/web/src/pages/Config.tsx
++++ b/apps/web/src/pages/Config.tsx
+@@ -3,12 +3,15 @@ import { useTranslation } from "react-i18next";
+ import { useNavigate, useParams } from "react-router-dom";
+ import api from "../services/api";
+ import { useAuth } from "../context/AuthContext";
++import { useBranding } from "../context/BrandingContext";
++import { LANGUAGES } from "../i18n";
+ 
+ interface Branch { id: number; name: string; locale: string; active: boolean; }
+ interface Driver { id: number; branch_id: number; name: string; document?: string; phone?: string; carrier?: string; active: boolean; }
+-interface Vehicle { id: number; branch_id: number; plate: string; description?: string; temperature_controlled: boolean; active: boolean; }
++interface Vehicle { id: number; branch_id: number; plate: string; description?: string; vehicle_type_id?: number | null; temperature_controlled: boolean; active: boolean; }
++interface VehicleType { id: number; code: string; label: string; label_pt_br?: string | null; sort_order: number; active: boolean; }
+ 
+-interface Reason { id: number; code: string; label: string; sort_order: number; active: boolean; }
++interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; sort_order: number; active: boolean; }
+ interface RoleProfile {
+   value: string;
+   label: string;
+@@ -19,12 +22,13 @@ interface RoleProfile {
+   system: boolean;
+ }
+ 
+-type Tab = "profiles" | "branches" | "drivers" | "vehicles" | "reasons";
++type Tab = "profiles" | "branches" | "drivers" | "vehicles" | "vehicle_types" | "reasons" | "branding";
+ 
+ export default function Config() {
+   const { t } = useTranslation();
+   const navigate = useNavigate();
+   const params = useParams();
++  const { hasRole } = useAuth();
+   const routeTab = params.tab as Tab | undefined;
+ 
+   const tabs: { key: Tab; label: string }[] = [
+@@ -32,7 +36,9 @@ export default function Config() {
+     { key: "branches", label: t("config.tabs.branches") },
+     { key: "drivers", label: t("config.tabs.drivers") },
+     { key: "vehicles", label: t("config.tabs.vehicles") },
++    { key: "vehicle_types", label: t("config.tabs.vehicle_types") },
+     { key: "reasons", label: t("config.tabs.reasons") },
++    ...(hasRole("admin_global") ? [{ key: "branding" as Tab, label: t("config.tabs.branding") }] : []),
+   ];
+   const tab = tabs.some((tb) => tb.key === routeTab) ? routeTab! : "drivers";
+ 
+@@ -56,7 +62,9 @@ export default function Config() {
+       {tab === "branches" && <BranchesTab />}
+       {tab === "drivers" && <DriversTab />}
+       {tab === "vehicles" && <VehiclesTab />}
++      {tab === "vehicle_types" && <VehicleTypesTab />}
+       {tab === "reasons" && <ReasonsTab />}
++      {tab === "branding" && <BrandingTab />}
+     </div>
+   );
+ }
+@@ -193,18 +201,18 @@ function ReasonsTab() {
+   const canDelete = hasRole("admin_global");
+   const [rows, setRows] = useState<Reason[]>([]);
+   const [editing, setEditing] = useState<"new" | number | null>(null);
+-  const [form, setForm] = useState({ label: "", sort_order: "100" });
++  const [form, setForm] = useState({ label: "", label_pt_br: "", sort_order: "100" });
+   const [error, setError] = useState("");
+ 
+   const reload = () => api.get("/failure-reasons").then((r) => setRows(r.data)).catch(() => setRows([]));
+   useEffect(() => { reload(); }, []);
+ 
+-  function startNew() { setError(""); setForm({ label: "", sort_order: "100" }); setEditing("new"); }
+-  function startEdit(r: Reason) { setError(""); setForm({ label: r.label, sort_order: String(r.sort_order) }); setEditing(r.id); }
++  function startNew() { setError(""); setForm({ label: "", label_pt_br: "", sort_order: "100" }); setEditing("new"); }
++  function startEdit(r: Reason) { setError(""); setForm({ label: r.label, label_pt_br: r.label_pt_br ?? "", sort_order: String(r.sort_order) }); setEditing(r.id); }
+ 
+   async function save(e: React.FormEvent) {
+     e.preventDefault(); setError("");
+-    const body = { label: form.label, sort_order: Number(form.sort_order) || 100 };
++    const body = { label: form.label, label_pt_br: form.label_pt_br || null, sort_order: Number(form.sort_order) || 100 };
+     try {
+       if (editing === "new") await api.post("/failure-reasons", body);
+       else if (typeof editing === "number") await api.put(`/failure-reasons/${editing}`, body);
+@@ -223,22 +231,26 @@ function ReasonsTab() {
+ 
+   return (
+     <Section title={t("config.tabs.reasons")} onNew={startNew} newLabel={t("config.new_reason")} error={error}>
+-      <p style={{ color: "#64748b", fontSize: 13, marginTop: 0 }}>{t("config.reasons_help")}</p>
++      <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 0 }}>{t("config.reasons_help")}</p>
+       {editing !== null && (
+         <form onSubmit={save} style={panel}>
+           <div style={grid}>
+-            <Field label={t("config.reason_label")}><input style={input} required value={form.label}
++            <Field label={t("config.reason_label_pt")}><input style={input} required value={form.label}
+               onChange={(e) => setForm({ ...form, label: e.target.value })} /></Field>
++            <Field label={t("config.reason_label_br")}><input style={input} value={form.label_pt_br}
++              placeholder={form.label}
++              onChange={(e) => setForm({ ...form, label_pt_br: e.target.value })} /></Field>
+             <Field label={t("config.sort_order")}><input type="number" style={input} value={form.sort_order}
+               onChange={(e) => setForm({ ...form, sort_order: e.target.value })} /></Field>
+           </div>
+           <FormButtons onCancel={() => setEditing(null)} />
+         </form>
+       )}
+-      <Table head={[t("config.reason_label"), t("config.sort_order"), t("users.active"), t("users.actions")]}>
++      <Table head={[t("config.reason_label_pt"), t("config.reason_label_br"), t("config.sort_order"), t("users.active"), t("users.actions")]}>
+         {rows.map((r) => (
+           <tr key={r.id} style={{ ...rowStyle, opacity: r.active ? 1 : 0.5 }}>
+             <td style={td}>{r.label}</td>
++            <td style={td}>{r.label_pt_br || r.label}</td>
+             <td style={td}>{r.sort_order}</td>
+             <td style={td}>{r.active ? t("common.yes") : t("common.no")}</td>
+             <td style={td}>
+@@ -398,29 +410,40 @@ function DriversTab() {
+ 
+ // ---------------------------------------------------------------- Veículos
+ function VehiclesTab() {
+-  const { t } = useTranslation();
++  const { t, i18n } = useTranslation();
+   const { user, hasRole } = useAuth();
+   const canDelete = hasRole("admin_global");
+   const [rows, setRows] = useState<Vehicle[]>([]);
++  const [types, setTypes] = useState<VehicleType[]>([]);
+   const [editing, setEditing] = useState<"new" | number | null>(null);
+-  const empty = { plate: "", description: "", temperature_controlled: false };
++  const empty = { plate: "", description: "", vehicle_type_id: "", temperature_controlled: false };
+   const [form, setForm] = useState({ ...empty });
+   const [error, setError] = useState("");
+ 
+-  const reload = () => api.get("/vehicles").then((r) => setRows(r.data)).catch(() => setRows([]));
++  const localizedTypeLabel = (vt: VehicleType) => (i18n.language === "pt-BR" && vt.label_pt_br) ? vt.label_pt_br : vt.label;
++  const typeLabelById = (id?: number | null) => {
++    const vt = types.find((t2) => t2.id === id);
++    return vt ? localizedTypeLabel(vt) : "—";
++  };
++
++  const reload = () => {
++    api.get("/vehicles").then((r) => setRows(r.data)).catch(() => setRows([]));
++    api.get("/vehicle-types", { params: { only_active: true } }).then((r) => setTypes(r.data)).catch(() => setTypes([]));
++  };
+   useEffect(() => { reload(); }, []);
+ 
+   function startNew() { setError(""); setForm({ ...empty }); setEditing("new"); }
+   function startEdit(v: Vehicle) {
+     setError("");
+-    setForm({ plate: v.plate, description: v.description ?? "", temperature_controlled: v.temperature_controlled });
++    setForm({ plate: v.plate, description: v.description ?? "", vehicle_type_id: v.vehicle_type_id ? String(v.vehicle_type_id) : "", temperature_controlled: v.temperature_controlled });
+     setEditing(v.id);
+   }
+   async function save(e: React.FormEvent) {
+     e.preventDefault(); setError("");
++    const payload = { ...form, vehicle_type_id: form.vehicle_type_id ? Number(form.vehicle_type_id) : null };
+     try {
+-      if (editing === "new") await api.post("/vehicles", { branch_id: user?.branch_id ?? 1, ...form });
+-      else if (typeof editing === "number") await api.put(`/vehicles/${editing}`, form);
++      if (editing === "new") await api.post("/vehicles", { branch_id: user?.branch_id ?? 1, ...payload });
++      else if (typeof editing === "number") await api.put(`/vehicles/${editing}`, payload);
+       setEditing(null); reload();
+     } catch (err: any) { setError(err?.response?.data?.detail ?? t("config.save_error")); }
+   }
+@@ -443,6 +466,15 @@ function VehiclesTab() {
+               onChange={(e) => setForm({ ...form, plate: e.target.value })} /></Field>
+             <Field label={t("config.description")}><input style={input} value={form.description}
+               onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
++            <Field label={t("config.vehicle_type")}>
++              <select style={input} value={form.vehicle_type_id}
++                onChange={(e) => setForm({ ...form, vehicle_type_id: e.target.value })}>
++                <option value="">—</option>
++                {types.map((vt) => (
++                  <option key={vt.id} value={vt.id}>{localizedTypeLabel(vt)}</option>
++                ))}
++              </select>
++            </Field>
+             <Field label={t("config.temperature")}>
+               <input type="checkbox" checked={form.temperature_controlled}
+                 onChange={(e) => setForm({ ...form, temperature_controlled: e.target.checked })} />
+@@ -451,11 +483,12 @@ function VehiclesTab() {
+           <FormButtons onCancel={() => setEditing(null)} />
+         </form>
+       )}
+-      <Table head={[t("config.plate"), t("config.description"), t("config.temperature"), t("users.active"), t("users.actions")]}>
++      <Table head={[t("config.plate"), t("config.description"), t("config.vehicle_type"), t("config.temperature"), t("users.active"), t("users.actions")]}>
+         {rows.map((v) => (
+           <tr key={v.id} style={{ ...rowStyle, opacity: v.active ? 1 : 0.5 }}>
+             <td style={td}>{v.plate}</td>
+             <td style={td}>{v.description ?? "—"}</td>
++            <td style={td}>{typeLabelById(v.vehicle_type_id)}</td>
+             <td style={td}>{v.temperature_controlled ? t("common.yes") : t("common.no")}</td>
+             <td style={td}>{v.active ? t("common.yes") : t("common.no")}</td>
+             <td style={td}>
+@@ -470,6 +503,353 @@ function VehiclesTab() {
+   );
+ }
+ 
++// ---------------------------------------------------------- Tipologias de veículo
++function VehicleTypesTab() {
++  const { t } = useTranslation();
++  const { hasRole } = useAuth();
++  const canDelete = hasRole("admin_global");
++  const [rows, setRows] = useState<VehicleType[]>([]);
++  const [editing, setEditing] = useState<"new" | number | null>(null);
++  const [form, setForm] = useState({ label: "", label_pt_br: "", sort_order: "100" });
++  const [error, setError] = useState("");
++
++  const reload = () => api.get("/vehicle-types").then((r) => setRows(r.data)).catch(() => setRows([]));
++  useEffect(() => { reload(); }, []);
++
++  function startNew() { setError(""); setForm({ label: "", label_pt_br: "", sort_order: "100" }); setEditing("new"); }
++  function startEdit(vt: VehicleType) { setError(""); setForm({ label: vt.label, label_pt_br: vt.label_pt_br ?? "", sort_order: String(vt.sort_order) }); setEditing(vt.id); }
++
++  async function save(e: React.FormEvent) {
++    e.preventDefault(); setError("");
++    const body = { label: form.label, label_pt_br: form.label_pt_br || null, sort_order: Number(form.sort_order) || 100 };
++    try {
++      if (editing === "new") await api.post("/vehicle-types", body);
++      else if (typeof editing === "number") await api.put(`/vehicle-types/${editing}`, body);
++      setEditing(null); reload();
++    } catch (err: any) { setError(err?.response?.data?.detail ?? t("config.save_error")); }
++  }
++  async function toggle(vt: VehicleType) {
++    try { await api.put(`/vehicle-types/${vt.id}`, { active: !vt.active }); reload(); }
++    catch (err: any) { setError(err?.response?.data?.detail ?? t("config.save_error")); }
++  }
++  async function remove(vt: VehicleType) {
++    if (!window.confirm(t("config.delete_confirm", { name: vt.label }) ?? "")) return;
++    try { await api.delete(`/vehicle-types/${vt.id}`); reload(); }
++    catch (err: any) { setError(err?.response?.data?.detail ?? t("config.save_error")); }
++  }
++
++  return (
++    <Section title={t("config.tabs.vehicle_types")} onNew={startNew} newLabel={t("config.new_vehicle_type")} error={error}>
++      <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 0 }}>{t("config.vehicle_types_help")}</p>
++      {editing !== null && (
++        <form onSubmit={save} style={panel}>
++          <div style={grid}>
++            <Field label={t("config.vehicle_type_label_pt")}><input style={input} required value={form.label}
++              onChange={(e) => setForm({ ...form, label: e.target.value })} /></Field>
++            <Field label={t("config.vehicle_type_label_br")}><input style={input} value={form.label_pt_br}
++              placeholder={form.label}
++              onChange={(e) => setForm({ ...form, label_pt_br: e.target.value })} /></Field>
++            <Field label={t("config.sort_order")}><input type="number" style={input} value={form.sort_order}
++              onChange={(e) => setForm({ ...form, sort_order: e.target.value })} /></Field>
++          </div>
++          <FormButtons onCancel={() => setEditing(null)} />
++        </form>
++      )}
++      <Table head={[t("config.vehicle_type_label_pt"), t("config.vehicle_type_label_br"), t("config.sort_order"), t("users.active"), t("users.actions")]}>
++        {rows.map((vt) => (
++          <tr key={vt.id} style={{ ...rowStyle, opacity: vt.active ? 1 : 0.5 }}>
++            <td style={td}>{vt.label}</td>
++            <td style={td}>{vt.label_pt_br || vt.label}</td>
++            <td style={td}>{vt.sort_order}</td>
++            <td style={td}>{vt.active ? t("common.yes") : t("common.no")}</td>
++            <td style={td}>
++              <button style={mini} onClick={() => startEdit(vt)}>{t("users.edit")}</button>
++              <button style={mini} onClick={() => toggle(vt)}>{vt.active ? t("users.deactivate") : t("users.activate")}</button>
++              {canDelete && <button style={mini} onClick={() => remove(vt)}>{t("common.delete")}</button>}
++            </td>
++          </tr>
++        ))}
++      </Table>
++    </Section>
++  );
++}
++
++// ---------------------------------------------------------- Personalização
++function BrandingTab() {
++  const { t } = useTranslation();
++  const { branding, reload } = useBranding();
++  const [form, setForm] = useState({ app_name: "", app_subtitle: "", primary_color: "#12a386" });
++  const [enabledLocales, setEnabledLocales] = useState<string[]>(LANGUAGES.map((l) => l.code));
++  const [topbarExtendsSidebar, setTopbarExtendsSidebar] = useState(true);
++  const [logo, setLogo] = useState<File | null>(null);
++  const [logoRail, setLogoRail] = useState<File | null>(null);
++  const [background, setBackground] = useState<File | null>(null);
++  const [favicon, setFavicon] = useState<File | null>(null);
++  const [loaded, setLoaded] = useState(false);
++  const [error, setError] = useState("");
++  const [success, setSuccess] = useState("");
++
++  useEffect(() => {
++    if (loaded) return;
++    setForm({
++      app_name: branding.app_name ?? "",
++      app_subtitle: branding.app_subtitle ?? "",
++      primary_color: branding.primary_color ?? "#12a386",
++    });
++    setEnabledLocales(branding.enabled_locales ?? LANGUAGES.map((l) => l.code));
++    setTopbarExtendsSidebar(branding.topbar_extends_sidebar);
++    setLoaded(true);
++  }, [branding, loaded]);
++
++  async function save(e: React.FormEvent) {
++    e.preventDefault();
++    setError(""); setSuccess("");
++    const payload = new FormData();
++    payload.set("app_name", form.app_name.trim());
++    payload.set("app_subtitle", form.app_subtitle.trim());
++    payload.set("primary_color", form.primary_color);
++    payload.set("enabled_locales", enabledLocales.join(","));
++    payload.set("topbar_extends_sidebar", String(topbarExtendsSidebar));
++    if (logo) payload.set("logo", logo);
++    if (logoRail) payload.set("logo_rail", logoRail);
++    if (background) payload.set("background", background);
++    if (favicon) payload.set("favicon", favicon);
++    try {
++      await api.put("/branding", payload);
++      setLogo(null); setLogoRail(null); setBackground(null); setFavicon(null);
++      await reload();
++      setSuccess(t("config.branding_saved"));
++    } catch (err: any) {
++      setError(err?.response?.data?.detail ?? t("config.save_error"));
++    }
++  }
++
++  async function removeImage(kind: "logo" | "logo_rail" | "background" | "favicon") {
++    setError(""); setSuccess("");
++    const payload = new FormData();
++    payload.set("app_name", form.app_name.trim());
++    payload.set("app_subtitle", form.app_subtitle.trim());
++    payload.set("primary_color", form.primary_color);
++    const removeField = { logo: "remove_logo", logo_rail: "remove_logo_rail", background: "remove_background", favicon: "remove_favicon" }[kind];
++    payload.set(removeField, "true");
++    try {
++      await api.put("/branding", payload);
++      await reload();
++      setSuccess(t("config.branding_saved"));
++    } catch (err: any) {
++      setError(err?.response?.data?.detail ?? t("config.save_error"));
++    }
++  }
++
++  return (
++    <Section title={t("config.tabs.branding")} newLabel="" error={error}>
++      <p style={{ color: "var(--muted)", fontSize: 13, marginTop: 0 }}>{t("config.branding_help")}</p>
++      {success && <p style={{ color: "#087461" }}>{success}</p>}
++      <form onSubmit={save} style={panel}>
++        <div style={grid}>
++          <Field label={t("config.branding_app_name")}>
++            <input style={input} value={form.app_name} placeholder="JM Rotas Portugal"
++              onChange={(e) => setForm({ ...form, app_name: e.target.value })} />
++          </Field>
++          <Field label={t("config.branding_app_subtitle")}>
++            <input style={input} value={form.app_subtitle} placeholder={t("app.subtitle")}
++              onChange={(e) => setForm({ ...form, app_subtitle: e.target.value })} />
++          </Field>
++          <Field label={t("config.branding_color")}>
++            <input style={{ ...input, height: 40, padding: 4 }} type="color" value={form.primary_color}
++              onChange={(e) => setForm({ ...form, primary_color: e.target.value })} />
++          </Field>
++          <Field label={t("config.branding_languages")}>
++            <div style={{ display: "flex", gap: 14, alignItems: "center", height: 40 }}>
++              {LANGUAGES.map((l) => (
++                <label key={l.code} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--ink)", cursor: "pointer" }}>
++                  <input
++                    type="checkbox"
++                    checked={enabledLocales.includes(l.code)}
++                    onChange={(e) => {
++                      if (!e.target.checked && enabledLocales.length === 1) return;
++                      setEnabledLocales((prev) =>
++                        e.target.checked ? [...prev, l.code] : prev.filter((code) => code !== l.code));
++                    }}
++                  />
++                  <img src={l.flagSrc} alt="" style={{ width: 20, height: 14, objectFit: "cover" }} />
++                </label>
++              ))}
++            </div>
++          </Field>
++          <Field label={t("config.branding_topbar_extends")}>
++            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--ink)", cursor: "pointer", height: 40 }}>
++              <input
++                type="checkbox"
++                checked={topbarExtendsSidebar}
++                onChange={(e) => setTopbarExtendsSidebar(e.target.checked)}
++              />
++              {t("config.branding_topbar_extends_label")}
++            </label>
++          </Field>
++        </div>
++        <div style={{ ...grid, marginTop: 12 }}>
++          <Field label={t("config.branding_logo")}>
++            <BrandingImageUpload
++              id="branding-logo"
++              accept="image/*"
++              file={logo}
++              currentUrl={branding.logo_url}
++              previewStyle={{ height: 36, maxWidth: 150, objectFit: "contain" }}
++              attachLabel={t("config.branding_attach_image")}
++              selectedLabel={t("common.selected_file")}
++              clearLabel={t("common.clear")}
++              deleteLabel={t("common.delete")}
++              onChange={setLogo}
++              onRemove={() => removeImage("logo")}
++            />
++          </Field>
++          <Field label={t("config.branding_logo_rail")}>
++            <BrandingImageUpload
++              id="branding-logo-rail"
++              accept="image/*"
++              file={logoRail}
++              currentUrl={branding.logo_rail_url}
++              previewStyle={{ height: 36, width: 36, objectFit: "contain" }}
++              attachLabel={t("config.branding_attach_image")}
++              selectedLabel={t("common.selected_file")}
++              clearLabel={t("common.clear")}
++              deleteLabel={t("common.delete")}
++              onChange={setLogoRail}
++              onRemove={() => removeImage("logo_rail")}
++            />
++          </Field>
++          <Field label={t("config.branding_background")}>
++            <BrandingImageUpload
++              id="branding-background"
++              accept="image/*"
++              file={background}
++              currentUrl={branding.background_url}
++              previewStyle={{ height: 42, width: 72, objectFit: "cover", borderRadius: 6 }}
++              attachLabel={t("config.branding_attach_image")}
++              selectedLabel={t("common.selected_file")}
++              clearLabel={t("common.clear")}
++              deleteLabel={t("common.delete")}
++              onChange={setBackground}
++              onRemove={() => removeImage("background")}
++            />
++          </Field>
++          <Field label={t("config.branding_favicon")}>
++            <BrandingImageUpload
++              id="branding-favicon"
++              accept="image/*,.ico"
++              file={favicon}
++              currentUrl={branding.favicon_url}
++              previewStyle={{ height: 28, width: 28, objectFit: "contain" }}
++              attachLabel={t("config.branding_attach_image")}
++              selectedLabel={t("common.selected_file")}
++              clearLabel={t("common.clear")}
++              deleteLabel={t("common.delete")}
++              onChange={setFavicon}
++              onRemove={() => removeImage("favicon")}
++            />
++          </Field>
++        </div>
++        <div style={{ marginTop: 12 }}>
++          <button type="submit" style={primary}>{t("common.save")}</button>
++        </div>
++      </form>
++    </Section>
++  );
++}
++
++function BrandingImageUpload({
++  id,
++  accept,
++  file,
++  currentUrl,
++  previewStyle,
++  attachLabel,
++  selectedLabel,
++  clearLabel,
++  deleteLabel,
++  onChange,
++  onRemove,
++}: {
++  id: string;
++  accept: string;
++  file: File | null;
++  currentUrl: string | null;
++  previewStyle: React.CSSProperties;
++  attachLabel: string;
++  selectedLabel: string;
++  clearLabel: string;
++  deleteLabel: string;
++  onChange: (file: File | null) => void;
++  onRemove: () => void;
++}) {
++  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
++  const [imageOk, setImageOk] = useState(true);
++
++  useEffect(() => {
++    if (!file) {
++      setPreviewUrl(null);
++      setImageOk(true);
++      return;
++    }
++    const url = URL.createObjectURL(file);
++    setPreviewUrl(url);
++    setImageOk(true);
++    return () => URL.revokeObjectURL(url);
++  }, [file]);
++
++  useEffect(() => {
++    setImageOk(true);
++  }, [currentUrl]);
++
++  const imageUrl = previewUrl || currentUrl;
++
++  return (
++    <div style={{ display: "grid", gap: 8 }}>
++      <label className="upload-pill" htmlFor={id}>
++        <input
++          id={id}
++          type="file"
++          accept={accept}
++          onChange={(e) => onChange(e.target.files?.[0] ?? null)}
++        />
++        <span className="upload-pill-icon"><UploadIcon /></span>
++        <span>{file ? `${selectedLabel}: ${file.name}` : attachLabel}</span>
++      </label>
++      {imageUrl && (
++        <div style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 42 }}>
++          {imageOk ? (
++            <img
++              src={imageUrl}
++              alt=""
++              style={previewStyle}
++              onError={() => setImageOk(false)}
++              onLoad={() => setImageOk(true)}
++            />
++          ) : (
++            <span style={{ color: "#b91c1c", fontSize: 12 }}>Preview indisponível</span>
++          )}
++          {file ? (
++            <button type="button" style={mini} onClick={() => onChange(null)}>{clearLabel}</button>
++          ) : currentUrl ? (
++            <button type="button" style={mini} onClick={onRemove}>{deleteLabel}</button>
++          ) : null}
++        </div>
++      )}
++    </div>
++  );
++}
++
++function UploadIcon() {
++  return (
++    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
++      <path d="M12 3v12" />
++      <path d="m7 8 5-5 5 5" />
++      <path d="M5 21h14" />
++    </svg>
++  );
++}
++
+ // ---------------------------------------------------------------- helpers UI
+ function Section({ title, onNew, newLabel, error, children }:
+   { title: string; onNew?: () => void; newLabel: string; error: string; children: React.ReactNode }) {
+@@ -507,22 +887,22 @@ function Table({ head, children }: { head: string[]; children: React.ReactNode }
+   );
+ }
+ 
+-const table: React.CSSProperties = { width: "100%", borderCollapse: "collapse", background: "#fff", borderRadius: 12, overflow: "hidden", marginTop: 12 };
+-const th: React.CSSProperties = { padding: 10, fontSize: 13, color: "#475569" };
+-const td: React.CSSProperties = { padding: 10, fontSize: 14 };
+-const rowStyle: React.CSSProperties = { borderTop: "1px solid #eef2f7" };
+-const mini: React.CSSProperties = { marginRight: 4, marginBottom: 4, padding: "4px 8px", fontSize: 12, border: "1px solid #cbd5e1", borderRadius: 6, background: "#fff", cursor: "pointer" };
++const table: React.CSSProperties = { width: "100%", borderCollapse: "collapse", background: "var(--panel)", borderRadius: 12, overflow: "hidden", marginTop: 12 };
++const th: React.CSSProperties = { padding: 10, fontSize: 13, color: "var(--muted)" };
++const td: React.CSSProperties = { padding: 10, fontSize: 14, color: "var(--ink)" };
++const rowStyle: React.CSSProperties = { borderTop: "1px solid var(--line)" };
++const mini: React.CSSProperties = { marginRight: 4, marginBottom: 4, padding: "4px 8px", fontSize: 12, border: "1px solid var(--line)", borderRadius: 6, background: "var(--panel)", color: "var(--ink)", cursor: "pointer" };
+ const primary: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "none", background: "#0a58ca", color: "#fff", cursor: "pointer", marginRight: 8 };
+-const ghost: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", cursor: "pointer" };
+-const panel: React.CSSProperties = { background: "#fff", borderRadius: 12, padding: 18, boxShadow: "0 2px 10px rgba(0,0,0,.05)", marginTop: 12 };
++const ghost: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--panel)", color: "var(--ink)", cursor: "pointer" };
++const panel: React.CSSProperties = { background: "var(--panel)", borderRadius: 12, padding: 18, boxShadow: "0 2px 10px rgba(0,0,0,.05)", marginTop: 12 };
+ const grid: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 12 };
+-const field: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: "#475569" };
+-const input: React.CSSProperties = { padding: 8, borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 14 };
++const field: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 4, fontSize: 13, color: "var(--muted)" };
++const input: React.CSSProperties = { padding: 8, borderRadius: 8, border: "1px solid var(--line)", fontSize: 14, background: "var(--panel)", color: "var(--ink)" };
+ const textarea: React.CSSProperties = { ...input, minHeight: 86, resize: "vertical" };
+-const muted: React.CSSProperties = { color: "#64748b", fontSize: 12, marginTop: 2 };
++const muted: React.CSSProperties = { color: "var(--muted)", fontSize: 12, marginTop: 2 };
+ const pageHeader: React.CSSProperties = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 };
+-const subtitle: React.CSSProperties = { color: "#64748b", margin: "6px 0 0", fontSize: 14 };
+-const tabsWrap: React.CSSProperties = { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", background: "#fff", padding: 6, borderRadius: 10, border: "1px solid #e2e8f0" };
+-const sectionShell: React.CSSProperties = { background: "#fff", borderRadius: 12, padding: 18, border: "1px solid #e2e8f0", boxShadow: "0 8px 22px rgba(15,23,42,.04)" };
+-const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", background: "transparent", cursor: "pointer", color: "#475569", fontWeight: 600 };
++const subtitle: React.CSSProperties = { color: "var(--muted)", margin: "6px 0 0", fontSize: 14 };
++const tabsWrap: React.CSSProperties = { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", background: "var(--panel)", padding: 6, borderRadius: 10, border: "1px solid var(--line)" };
++const sectionShell: React.CSSProperties = { background: "var(--panel)", borderRadius: 12, padding: 18, border: "1px solid var(--line)", boxShadow: "0 8px 22px rgba(15,23,42,.04)" };
++const tabBtn: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "1px solid transparent", background: "transparent", cursor: "pointer", color: "var(--muted)", fontWeight: 600 };
+ const tabActive: React.CSSProperties = { background: "#0f172a", color: "#fff", border: "1px solid #0f172a" };
+diff --git a/apps/web/src/pages/Login.tsx b/apps/web/src/pages/Login.tsx
+index fd9ba5a..a463593 100644
+--- a/apps/web/src/pages/Login.tsx
++++ b/apps/web/src/pages/Login.tsx
+@@ -3,12 +3,15 @@ import { useTranslation } from "react-i18next";
+ import { useNavigate } from "react-router-dom";
+ import { login } from "../services/api";
+ import { useAuth } from "../context/AuthContext";
++import { useBranding } from "../context/BrandingContext";
+ import LanguageSwitcher from "../components/LanguageSwitcher";
++import ThemeToggle from "../components/ThemeToggle";
+ 
+ export default function Login() {
+   const { t } = useTranslation();
+   const navigate = useNavigate();
+   const { refresh } = useAuth();
++  const { branding } = useBranding();
+   const [email, setEmail] = useState("");
+   const [password, setPassword] = useState("");
+   const [error, setError] = useState("");
+@@ -29,19 +32,36 @@ export default function Login() {
+     }
+   }
+ 
++  const accent = branding.primary_color || "#0a58ca";
++  const accentText = readableTextColor(accent);
++  const pageStyle: React.CSSProperties = branding.background_url
++    ? { backgroundImage: `url(${branding.background_url})` }
++    : {};
++
+   return (
+-    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f1f5f9" }}>
+-      <form onSubmit={onSubmit} style={{ width: 360, background: "#fff", padding: 28, borderRadius: 14, boxShadow: "0 8px 30px rgba(0,0,0,.08)" }}>
+-        <h1 style={{ marginTop: 0, fontSize: 22 }}>{t("app.title")}</h1>
+-        <div style={{ marginBottom: 16 }}><LanguageSwitcher /></div>
+-        <label>{t("login.email")}</label>
++    <div className={`login-page${branding.background_url ? " has-background" : ""}`} style={pageStyle}>
++      <form onSubmit={onSubmit} className="login-card">
++        <div className="login-brand">
++          {branding.logo_url ? (
++            <span className="login-logo-frame">
++              <img src={branding.logo_url} alt={branding.app_name ?? t("app.title")} />
++            </span>
++          ) : (
++            <h1>{branding.app_name || t("app.title")}</h1>
++          )}
++        </div>
++        <div className="login-tools">
++          <ThemeToggle />
++          <LanguageSwitcher />
++        </div>
++        <label className="login-label">{t("login.email")}</label>
+         <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required
+-          style={inputStyle} />
+-        <label>{t("login.password")}</label>
++          className="login-input" />
++        <label className="login-label">{t("login.password")}</label>
+         <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required
+-          style={inputStyle} />
+-        {error && <p style={{ color: "#c00" }}>{error}</p>}
+-        <button type="submit" disabled={loading} style={btnStyle}>
++          className="login-input" />
++        {error && <p className="login-error">{error}</p>}
++        <button type="submit" disabled={loading} className="login-submit" style={{ background: accent, color: accentText }}>
+           {loading ? t("common.loading") : t("login.submit")}
+         </button>
+       </form>
+@@ -49,9 +69,13 @@ export default function Login() {
+   );
+ }
+ 
+-const inputStyle: React.CSSProperties = {
+-  width: "100%", padding: 10, margin: "6px 0 14px", borderRadius: 8, border: "1px solid #cbd5e1", boxSizing: "border-box",
+-};
+-const btnStyle: React.CSSProperties = {
+-  width: "100%", padding: 12, borderRadius: 8, border: "none", background: "#0a58ca", color: "#fff", fontSize: 15, cursor: "pointer",
+-};
++function readableTextColor(hex: string): string {
++  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
++  if (!match) return "#fff";
++  const value = match[1];
++  const r = parseInt(value.slice(0, 2), 16);
++  const g = parseInt(value.slice(2, 4), 16);
++  const b = parseInt(value.slice(4, 6), 16);
++  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
++  return luminance > 0.6 ? "#0f172a" : "#fff";
++}
+diff --git a/apps/web/src/pages/Manifests.tsx b/apps/web/src/pages/Manifests.tsx
+index 83230f3..dcbd23b 100644
+--- a/apps/web/src/pages/Manifests.tsx
++++ b/apps/web/src/pages/Manifests.tsx
+@@ -127,7 +127,7 @@ export default function ManifestsPage() {
+ 
+   async function generateRoute() {
+     if (!selectedId) return;
+-    const validation = validateRouteJson(jsonText);
++    const validation = validateRouteJson(jsonText, t);
+     if (validation) {
+       setError(validation);
+       return;
+@@ -167,31 +167,34 @@ export default function ManifestsPage() {
+       {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
+ 
+       <div className="manifest-layout">
+-        <aside style={panel}>
++        <aside className="manifest-history-panel" style={panel}>
+           <h3 style={{ marginTop: 0 }}>{t("manifest.history")}</h3>
+           {items.length === 0 ? (
+             <p>{t("manifest.empty")}</p>
+           ) : (
+-            <div style={{ display: "grid", gap: 8 }}>
++            <div className="manifest-history-list">
+               {items.map((m) => (
+                 <button
+                   key={m.id}
++                  className="manifest-history-item"
+                   onClick={() => setSelectedId(m.id)}
+                   style={{
+                     ...listBtn,
+-                    borderColor: selectedId === m.id ? "#0a58ca" : "#cbd5e1",
++                    borderColor: selectedId === m.id ? "#bfdbfe" : "#cbd5e1",
+                     background: selectedId === m.id ? "#eff6ff" : "#fff",
++                    boxShadow: selectedId === m.id ? "inset 3px 0 0 #0a58ca" : "none",
+                   }}
+                 >
+-                  <strong>#{m.id}</strong> {m.original_filename}
+-                  <span style={{ color: "#64748b" }}>{m.status}</span>
++                  <strong>#{m.id}</strong>
++                  <span title={m.original_filename}>{m.original_filename}</span>
++                  <span style={{ color: "#64748b" }}>{t(`manifest_status.${m.status}`, { defaultValue: m.status })}</span>
+                 </button>
+               ))}
+             </div>
+           )}
+         </aside>
+ 
+-        <section>
++        <section className="manifest-main-panel">
+           {!selected ? (
+             <div style={panel}>{t("manifest.select")}</div>
+           ) : (
+@@ -199,7 +202,7 @@ export default function ManifestsPage() {
+               <div style={panel}>
+                 <h3 style={{ marginTop: 0 }}>{selected.original_filename}</h3>
+                 <div style={{ display: "flex", flexWrap: "wrap", gap: 12, color: "#475569" }}>
+-                  <span>{t("manifest.status")}: <strong>{detail?.manifest.status ?? selected.status}</strong></span>
++                  <span>{t("manifest.status")}: <strong>{t(`manifest_status.${detail?.manifest.status ?? selected.status}`, { defaultValue: detail?.manifest.status ?? selected.status })}</strong></span>
+                   <span>{t("manifest.confidence")}: <strong>{formatConfidence(detail?.ocr?.confidence ?? selected.ocr_confidence)}</strong></span>
+                   <span>{t("manifest.engine")}: <strong>{detail?.ocr?.engine ?? "-"}</strong></span>
+                   {detail?.manifest.route_id && <span>{t("manifest.route")}: <strong>#{detail.manifest.route_id}</strong></span>}
+@@ -213,7 +216,7 @@ export default function ManifestsPage() {
+                 <div style={panel}>
+                   <h3 style={{ marginTop: 0 }}>{t("manifest.original")}</h3>
+                   {detail?.file_url ? (
+-                    <iframe title="manifest-file" src={detail.file_url} style={{ width: "100%", height: 620, border: "1px solid #cbd5e1", borderRadius: 8 }} />
++                    <iframe title="manifest-file" src={detail.file_url} className="manifest-file-frame" />
+                   ) : (
+                     <p>{loading ? t("common.loading") : t("manifest.no_file")}</p>
+                   )}
+@@ -227,9 +230,9 @@ export default function ManifestsPage() {
+                     spellCheck={false}
+                     style={textarea}
+                   />
+-                  <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
++                  <div className="manifest-actions">
+                     <button onClick={confirm} disabled={loading} className="btn-primary">{t("manifest.confirm")}</button>
+-                    <button onClick={generateRoute} disabled={loading || detail?.manifest.status !== "CONFERIDO" || Boolean(validateRouteJson(jsonText))} className="btn-ghost">
++                    <button onClick={generateRoute} disabled={loading || detail?.manifest.status !== "CONFERIDO" || Boolean(validateRouteJson(jsonText, t))} className="btn-ghost">
+                       {t("manifest.generate")}
+                     </button>
+                   </div>
+@@ -256,16 +259,16 @@ function apiError(err: unknown, fallback: string) {
+   return fallback;
+ }
+ 
+-function validateRouteJson(text: string) {
++function validateRouteJson(text: string, t: (key: string) => string) {
+   let payload: Record<string, unknown>;
+   try {
+     payload = JSON.parse(text);
+   } catch {
+-    return "JSON inválido.";
++    return t("manifest.validation.invalid_json");
+   }
+-  if (!String(payload.codigo_ut ?? "").trim()) return "Preencha codigo_ut antes de gerar a rota.";
+-  if (!String(payload.data_carga ?? "").trim()) return "Preencha data_carga antes de gerar a rota. Use AAAA-MM-DD ou DD/MM/AAAA.";
+-  if (!Array.isArray(payload.destinos)) return "O campo destinos precisa ser uma lista.";
++  if (!String(payload.codigo_ut ?? "").trim()) return t("manifest.validation.code_required");
++  if (!String(payload.data_carga ?? "").trim()) return t("manifest.validation.date_required");
++  if (!Array.isArray(payload.destinos)) return t("manifest.validation.destinations_list");
+   return "";
+ }
+ 
+diff --git a/apps/web/src/pages/Users.tsx b/apps/web/src/pages/Users.tsx
+index 6150286..2116839 100644
+--- a/apps/web/src/pages/Users.tsx
++++ b/apps/web/src/pages/Users.tsx
+@@ -14,8 +14,12 @@ interface RoleOption {
+   permissions?: string[];
+   order?: number;
+ }
++interface BranchOption {
++  id: number;
++  name: string;
++}
+ 
+-const EMPTY = { email: "", name: "", role: "motorista", password: "" };
++const EMPTY = { email: "", name: "", role: "motorista", password: "", branch_id: "" };
+ const ROLE_ORDER = [
+   "admin_global",
+   "auditor",
+@@ -27,9 +31,11 @@ const ROLE_ORDER = [
+ 
+ export default function Users() {
+   const { t } = useTranslation();
+-  const { user: me } = useAuth();
++  const { user: me, hasRole } = useAuth();
++  const isAdminGlobal = hasRole("admin_global");
+   const [users, setUsers] = useState<UserRow[]>([]);
+   const [roles, setRoles] = useState<RoleOption[]>([]);
++  const [branches, setBranches] = useState<BranchOption[]>([]);
+   const [editing, setEditing] = useState<"new" | number | null>(null);
+   const [form, setForm] = useState({ ...EMPTY });
+   const [error, setError] = useState("");
+@@ -41,17 +47,22 @@ export default function Users() {
+     api.get("/users/roles")
+       .then((r) => setRoles(orderRoles(r.data)))
+       .catch(() => setRoles(orderRoles(ROLE_ORDER.map((value) => ({ value, description: "" })))));
++    api.get("/branches").then((r) => setBranches(r.data)).catch(() => setBranches([]));
+   }, []);
+ 
++  const branchName = (branchId: number | null) =>
++    branches.find((b) => b.id === branchId)?.name ?? "—";
++
+   function startNew() {
+     setError("");
+-    setForm({ ...EMPTY });
++    const defaultBranch = me?.branch_id ?? branches[0]?.id ?? "";
++    setForm({ ...EMPTY, branch_id: defaultBranch ? String(defaultBranch) : "" });
+     setEditing("new");
+   }
+ 
+   function startEdit(u: UserRow) {
+     setError("");
+-    setForm({ email: u.email, name: u.name, role: u.role, password: "" });
++    setForm({ email: u.email, name: u.name, role: u.role, password: "", branch_id: u.branch_id ? String(u.branch_id) : "" });
+     setEditing(u.id);
+   }
+ 
+@@ -63,9 +74,13 @@ export default function Users() {
+         await api.post("/users", {
+           email: form.email, name: form.name, role: form.role,
+           password: form.password || null,
++          ...(isAdminGlobal && form.branch_id ? { branch_id: Number(form.branch_id) } : {}),
+         });
+       } else if (typeof editing === "number") {
+-        await api.put(`/users/${editing}`, { name: form.name, role: form.role });
++        await api.put(`/users/${editing}`, {
++          name: form.name, role: form.role,
++          ...(isAdminGlobal && form.branch_id ? { branch_id: Number(form.branch_id) } : {}),
++        });
+       }
+       setEditing(null);
+       reload();
+@@ -144,6 +159,17 @@ export default function Users() {
+                   onChange={(e) => setForm({ ...form, password: e.target.value })} />
+               </label>
+             )}
++            {isAdminGlobal && (
++              <label style={field}>
++                <span>{t("users.branch")}</span>
++                <select style={input} value={form.branch_id}
++                  onChange={(e) => setForm({ ...form, branch_id: e.target.value })}>
++                  {branches.map((b) => (
++                    <option key={b.id} value={b.id}>{b.name}</option>
++                  ))}
++                </select>
++              </label>
++            )}
+           </div>
+           <div style={{ marginTop: 12 }}>
+             <button type="submit" style={primary}>{t("common.save")}</button>
+@@ -158,6 +184,7 @@ export default function Users() {
+             <th style={th}>{t("users.name")}</th>
+             <th style={th}>{t("users.email")}</th>
+             <th style={th}>{t("users.role")}</th>
++            {isAdminGlobal && <th style={th}>{t("users.branch")}</th>}
+             <th style={th}>{t("users.active")}</th>
+             <th style={th}>{t("users.actions")}</th>
+           </tr>
+@@ -168,6 +195,7 @@ export default function Users() {
+               <td style={td}>{u.name}</td>
+               <td style={td}>{u.email}</td>
+               <td style={td}>{roleLabel(u.role)}</td>
++              {isAdminGlobal && <td style={td}>{branchName(u.branch_id)}</td>}
+               <td style={td}>{u.active ? t("common.yes") : t("common.no")}</td>
+               <td style={td}>
+                 <button style={mini} onClick={() => startEdit(u)}>{t("users.edit")}</button>

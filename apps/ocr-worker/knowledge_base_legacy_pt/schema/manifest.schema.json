@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jmrotas.pt/schema/manifest.schema.json",
+  "title": "Manifesto JM Rotas — saída estruturada",
+  "description": "Estrutura canônica que o extrator (regras ou IA) deve produzir a partir de um manifesto Salvesen. Uma rota = um Código UT. Cada linha de DESTINO da tabela = uma parada.",
+  "type": "object",
+  "required": ["codigo_ut", "data_carga", "origem", "destinos", "confianca_ocr", "necessita_revisao"],
+  "properties": {
+    "tipo_documento": {
+      "type": "string",
+      "const": "MANIFIESTO",
+      "description": "Só páginas com 'MANIFIESTO' no cabeçalho são consideradas."
+    },
+    "codigo_ut": {
+      "type": "string",
+      "description": "Código UT / Nº da Volta — é o CÓDIGO DA ROTA.",
+      "examples": ["3466594", "3469205"]
+    },
+    "data_carga": {
+      "type": ["string", "null"],
+      "format": "date",
+      "description": "Fecha de Carga normalizada para YYYY-MM-DD.",
+      "examples": ["2026-06-08", "2026-06-11"]
+    },
+    "hora_carga": {
+      "type": ["string", "null"],
+      "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+      "examples": ["05:00", "05:45"]
+    },
+    "origem": {
+      "type": ["string", "null"],
+      "description": "Origen do cabeçalho (ex.: SALVESEN LOGISTICA PORTUGAL)."
+    },
+    "origem_morada": { "type": ["string", "null"] },
+    "transportadora": { "type": ["string", "null"], "examples": ["J. MARCOS, FÁBIO E SEATLLE TRANSPORTES LDA"] },
+    "matricula": { "type": ["string", "null"], "examples": ["24-XC-34"] },
+    "natureza": { "type": ["string", "null"], "examples": ["PRODUTO A TEMPERATURA CONTROLADA 4º/Ambiente"] },
+    "paginas_consideradas": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "description": "Índices (1-based) das páginas MANIFIESTO usadas."
+    },
+    "destinos": {
+      "type": "array",
+      "description": "Uma entrada por linha de DESTINO. No manifesto cada parada tem 2 linhas (cliente+morada e fornecedor+pedido) que devem ser AGRUPADAS numa só parada.",
+      "items": {
+        "type": "object",
+        "required": ["nome"],
+        "properties": {
+          "sequencia": { "type": "integer", "minimum": 1 },
+          "origem": { "type": ["string", "null"] },
+          "nome": { "type": "string", "description": "Cliente/destino.", "examples": ["LUCKYVISION UNIPESSOAL, LDA"] },
+          "morada": { "type": ["string", "null"] },
+          "codigo_postal": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{3}$", "examples": ["2780-307"] },
+          "cidade": { "type": ["string", "null"] },
+          "data_limite": { "type": ["string", "null"], "format": "date" },
+          "hora_limite": { "type": ["string", "null"], "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$" },
+          "temperatura": { "type": ["string", "null"], "description": "Ambiente | 4 | ...", "examples": ["Ambiente", "4"] },
+          "peso_kg": { "type": ["number", "null"], "description": "PESO em kg (2.314,22 Kg -> 2314.22)." },
+          "pales": { "type": ["number", "null"], "description": "PALÉS (2,85 Pal -> 2.85)." },
+          "pedido": { "type": ["string", "null"], "description": "Número(s) de PEDIDO, juntos por ' / '." },
+          "fornecedor": { "type": ["string", "null"], "examples": ["Alpro Portugal (311)", "Danone Portugal (011)"] },
+          "confianca": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "confianca_ocr": { "type": "number", "minimum": 0, "maximum": 1 },
+    "necessita_revisao": { "type": "boolean", "description": "true se confianca_ocr < limite ou algum campo crítico vazio." }
+  }
+}

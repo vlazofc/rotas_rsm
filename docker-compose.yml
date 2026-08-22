@@ -1,0 +1,261 @@
+# ============================================================
+# Rotas Brasil — Docker Compose
+#
+# Links locais:
+# - Sistema:       http://localhost:8089
+# - API docs:      http://localhost:8001/docs
+# - API health:    http://localhost:8001/health
+# - MinIO console: http://localhost:9003
+#
+# VPS com Cloudflare Tunnel:
+# - docker compose --profile cloudflare up -d --build
+# ============================================================
+
+services:
+  # --- Túnel Cloudflare: única porta de entrada pública ---
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: rotas_cloudflared
+    profiles: ["cloudflare"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - proxy
+    networks:
+      - internal
+
+  # --- Proxy interno (roteia / -> web e /api -> api) ---
+  proxy:
+    image: caddy:2
+    container_name: rotas_proxy
+    restart: unless-stopped
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "8089:80"            # http://localhost:8089
+    depends_on:
+      - web
+      - api
+    networks:
+      - internal
+
+  # --- Frontend (build estático servido por nginx) ---
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+    container_name: rotas_web
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./map-tiles:/usr/share/nginx/html/tiles:ro
+    networks:
+      - internal
+
+  # --- API FastAPI ---
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: rotas_api
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: >
+      gunicorn app.main:app
+      -k uvicorn.workers.UvicornWorker
+      --workers 4
+      --bind 0.0.0.0:8000
+      --timeout 120
+    ports:
+      - "8001:8000"          # http://localhost:8001/docs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    networks:
+      - internal
+
+  # --- Worker Celery genérico (notificações, cálculos) ---
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: rotas_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
+    healthcheck:
+      disable: true
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - internal
+
+  # --- Worker OCR (EasyOCR + Tesseract) ---
+  ocr-worker:
+    build:
+      context: ./apps/ocr-worker
+      dockerfile: Dockerfile
+    container_name: rotas_ocr_worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: celery -A worker.celery_app worker --loglevel=info --concurrency=1 -Q ocr
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    networks:
+      - internal
+
+  # --- Scheduler (Celery beat) ---
+  scheduler:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: rotas_scheduler
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    healthcheck:
+      disable: true
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - internal
+
+  # --- PostgreSQL + PostGIS ---
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: rotas_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${APP_TIMEZONE}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"          # porta local 5434 (evita conflito com PostgreSQL local/outros projetos)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # --- Redis ---
+  redis:
+    image: redis:7-alpine
+    container_name: rotas_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - internal
+
+  # --- MinIO ---
+  minio:
+    image: minio/minio:latest
+    container_name: rotas_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9002:9000"
+      - "9003:9001"          # console MinIO http://localhost:9003
+    networks:
+      - internal
+
+  # --- Backup diário do PostgreSQL ---
+  backup:
+    image: postgres:16-alpine
+    container_name: rotas_backup
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup_postgres.sh:/backup_postgres.sh:ro
+    entrypoint: ["sh", "-c", "while true; do sh /backup_postgres.sh; sleep 86400; done"]
+    depends_on:
+      - postgres
+    networks:
+      - internal
+
+  # --- Aprendizado automático: exporta conferências -> base de conhecimento + dataset ---
+  # Roda sozinho 1x/dia. A base cresce a cada conferência salva pelos operadores.
+  training-export:
+    build:
+      context: ./apps/ocr-worker
+      dockerfile: Dockerfile
+    container_name: rotas_training_export
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app/knowledge_base_legacy_pt/training
+    # Persiste os exemplos/dataset no repositório (host), versionável no Git.
+    # Base herdada do piloto Portugal/Salvesen — substituir por exemplos Brasil.
+    volumes:
+      - ./apps/ocr-worker/knowledge_base_legacy_pt:/app/knowledge_base_legacy_pt
+    entrypoint: ["sh", "-c", "while true; do python export_training_data.py || true; sleep 86400; done"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
+  # --- Ollama (IA local p/ extração estruturada) — opcional ---
+  # Ative com:  docker compose --profile llm up -d
+  # Requer EXTRACTOR=llm e OCR_LLM_BASE_URL=http://ollama:11434/v1 no .env
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rotas_ollama
+    restart: unless-stopped
+    profiles: ["llm"]
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - internal
+    # Para GPU NVIDIA, descomente (precisa nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  caddy_data:
+  caddy_config:
+  ollama_data:
