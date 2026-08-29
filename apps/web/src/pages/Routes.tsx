@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import api from "../services/api";
+import { applyTimemark } from "../services/timemark";
 import { useAuth } from "../context/AuthContext";
 import { usePolling } from "../hooks/usePolling";
 import RouteMap from "../components/RouteMap";
@@ -39,35 +40,14 @@ interface RouteAction {
   primary?: boolean;
 }
 type RouteFilter = "open" | "closed" | "all";
+type RouteView = "map" | "assignments";
 interface Driver { id: number; name: string; active: boolean; }
 interface Vehicle { id: number; plate: string; active: boolean; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
-interface ManifestItem {
-  id: number;
-  route_id: number | null;
-  original_filename: string;
-  status: string;
-}
-interface ManifestSuggestions {
-  codigo_ut: string[];
-  origins: string[];
-  addresses: string[];
-  customers: string[];
-  cities: string[];
-  orders: string[];
-}
 
 const STATUS_COLOR: Record<string, string> = {
   planejada: "#64748b", em_carregamento: "#0ea5e9", liberada: "#a855f7",
   em_rota: "#16a34a", finalizada: "#f97316", cancelada: "#ef4444",
-};
-const emptySuggestions: ManifestSuggestions = {
-  codigo_ut: [],
-  origins: [],
-  addresses: [],
-  customers: [],
-  cities: [],
-  orders: [],
 };
 
 function routeCustomers(route: Pick<RouteItem, "stops">) {
@@ -86,8 +66,6 @@ export default function RoutesPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [reasons, setReasons] = useState<Reason[]>([]);
-  const [manifests, setManifests] = useState<ManifestItem[]>([]);
-  const [suggestions, setSuggestions] = useState<ManifestSuggestions>(emptySuggestions);
   const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
   const [proofStop, setProofStop] = useState<{ routeId: number; stop: Stop } | null>(null);
   const [proofFile, setProofFile] = useState<File | null>(null);
@@ -105,6 +83,9 @@ export default function RoutesPage() {
   const [kmRouteId, setKmRouteId] = useState<number | null>(null);
   const [kmForm, setKmForm] = useState({ km_outbound_informed: "", km_return_informed: "" });
   const [routeFilter, setRouteFilter] = useState<RouteFilter>("open");
+  const [routeView, setRouteView] = useState<RouteView>("map");
+  const [assignmentDate, setAssignmentDate] = useState("");
+  const [assignmentSearch, setAssignmentSearch] = useState("");
   const [routeListExpanded, setRouteListExpanded] = useState(false);
   const [editing, setEditing] = useState<"new" | number | null>(null);
   const [form, setForm] = useState({ codigo_ut: "", route_date: "", origin_name: "", origin_address: "", driver_id: "", vehicle_id: "" });
@@ -112,19 +93,16 @@ export default function RoutesPage() {
   const [importOpen, setImportOpen] = useState(false);
 
   const reload = () => api.get<RouteItem[]>("/routes").then((r) => setRoutes(r.data)).catch(() => setRoutes([]));
-  const reloadManifests = () => api.get<ManifestItem[]>("/manifests").then((r) => setManifests(r.data)).catch(() => setManifests([]));
   useEffect(() => {
     reload();
-    reloadManifests();
-    api.get<ManifestSuggestions>("/manifests/suggestions").then((r) => setSuggestions(r.data)).catch(() => setSuggestions(emptySuggestions));
     api.get("/drivers").then((r) => setDrivers(r.data)).catch(() => setDrivers([]));
     api.get("/vehicles").then((r) => setVehicles(r.data)).catch(() => setVehicles([]));
     api.get("/failure-reasons", { params: { only_active: true } }).then((r) => setReasons(r.data)).catch(() => setReasons([]));
   }, []);
 
-  // Mantém a lista de rotas e manifestos atualizada sem depender de F5,
+  // Mantém a lista de rotas atualizada sem depender de F5,
   // já que outros utilizadores podem alterar o status em tempo real.
-  usePolling(() => { reload(); reloadManifests(); }, REFRESH_INTERVAL_MS);
+  usePolling(reload, REFRESH_INTERVAL_MS);
 
   useEffect(() => {
     if (!selectedRouteId && routes.length > 0) setSelectedRouteId(routes[0].id);
@@ -402,7 +380,12 @@ export default function RoutesPage() {
     return r ? localizedReasonLabel(r) : "-";
   };
   const canEdit = hasRole("admin_global", "gestor_brasil", "operador_logistico");
+  const canUseManagementView = hasRole("admin_global", "gestor_brasil", "operador_logistico");
   const canRegisterToll = hasRole("admin_global", "gestor_brasil", "operador_logistico", "motorista");
+
+  useEffect(() => {
+    if (!canUseManagementView && routeView !== "map") setRouteView("map");
+  }, [canUseManagementView, routeView]);
   const sortedRoutes = useMemo(() => [...routes].sort(compareRoutesByDueDate), [routes]);
   const visibleRoutes = useMemo(() => sortedRoutes.filter((route) => {
     if (routeFilter === "all") return true;
@@ -412,12 +395,10 @@ export default function RoutesPage() {
   const visibleSelectedRoute = selectedRoute && visibleRoutes.some((route) => route.id === selectedRoute.id)
     ? selectedRoute
     : visibleRoutes[0] ?? null;
-  const activeMapRoutes = visibleRoutes.filter((route) => route.status === "em_rota" || route.status === "finalizada");
-  const mapRoutes = activeMapRoutes.length > 0 ? activeMapRoutes : visibleRoutes;
-  const selectedRouteManifest = useMemo(
-    () => manifests.find((manifest) => manifest.route_id === visibleSelectedRoute?.id) ?? null,
-    [manifests, visibleSelectedRoute?.id],
-  );
+  // A rota selecionada nunca pode desaparecer do mapa por causa do status.
+  // Todas as rotas do filtro atual permanecem disponíveis e as demais são
+  // atenuadas pelo RouteMap quando há uma seleção.
+  const mapRoutes = visibleRoutes;
   const routeActions = (route: RouteItem): RouteAction[] => {
     const dock = route.dock_session;
     if (!dock?.arrival_cd_at) return [{ path: "arrive-cd", label: t("route.arrive_cd_short") }];
@@ -436,6 +417,14 @@ export default function RoutesPage() {
     closed: visibleRoutes.filter((r) => r.status === "finalizada").length,
   };
   const visibleToolbarActions = visibleSelectedRoute ? routeActions(visibleSelectedRoute) : [];
+  const assignmentRoutes = useMemo(() => visibleRoutes.filter((route) => {
+    if (assignmentDate && route.route_date !== assignmentDate) return false;
+    const query = assignmentSearch.trim().toLocaleLowerCase("pt-BR");
+    if (!query) return true;
+    return [route.codigo_ut, route.origin_name, route.fieldeas_description, routeCustomers(route), driverName(route.driver_id), vehiclePlate(route.vehicle_id)]
+      .some((value) => String(value ?? "").toLocaleLowerCase("pt-BR").includes(query));
+  }), [visibleRoutes, assignmentDate, assignmentSearch, drivers, vehicles]);
+  const assignedRoutes = assignmentRoutes.filter((route) => route.driver_id && route.vehicle_id).length;
 
   return (
     <div>
@@ -444,24 +433,36 @@ export default function RoutesPage() {
           <h2>{t("nav.routes")}</h2>
           <p className="page-subtitle">{t("route.subtitle")}</p>
         </div>
-        {canEdit && (
-          <div style={{ display: "flex", gap: 8 }}>
+        <div className="route-header-actions">
+          {canUseManagementView && (
+            <div className={`route-view-switch is-${routeView}`} role="group" aria-label="Visualização de rotas">
+              <span className="route-view-slider" aria-hidden="true" />
+              <button className={routeView === "map" ? "is-active" : ""} onClick={() => setRouteView("map")} aria-pressed={routeView === "map"}>
+                <MapViewIcon /><span>Mapa</span>
+              </button>
+              <button className={routeView === "assignments" ? "is-active" : ""} onClick={() => setRouteView("assignments")} aria-pressed={routeView === "assignments"}>
+                <AssignmentIcon /><span>Gestão</span>
+              </button>
+            </div>
+          )}
+          {canEdit && <>
             <button className="btn-ghost" onClick={() => setImportOpen(true)}>{t("route.import")}</button>
             <button className="btn-primary btn-add" onClick={startNew}><span className="btn-add-symbol">+</span><span>{t("route.new")}</span></button>
-          </div>
-        )}
+          </>}
+        </div>
       </div>
       {importOpen && <ImportRoutesModal onClose={() => setImportOpen(false)} onImported={reload} />}
 
       {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
 
       {editing !== null && (
-        <form onSubmit={save} className="card-panel form-panel">
+        <div className="modal-backdrop" onClick={() => setEditing(null)}>
+        <form onSubmit={save} className="modal-card" onClick={(event) => event.stopPropagation()}>
           <h3 style={{ marginTop: 0 }}>{editing === "new" ? t("route.new") : t("route.edit")}</h3>
           <div className="form-grid">
             <label className="field">
               <span>{t("route.code")}</span>
-              <input className="input" list="route-code-suggestions" value={form.codigo_ut} placeholder={t("route.code_optional") ?? ""} onChange={(e) => setForm({ ...form, codigo_ut: e.target.value })} />
+              <input className="input" value={form.codigo_ut} placeholder={t("route.code_optional") ?? ""} onChange={(e) => setForm({ ...form, codigo_ut: e.target.value })} />
             </label>
             <label className="field">
               <span>{t("route.date")}</span>
@@ -469,11 +470,11 @@ export default function RoutesPage() {
             </label>
             <label className="field">
               <span>{t("route.origin")}</span>
-              <input className="input" list="route-origin-suggestions" value={form.origin_name} onChange={(e) => setForm({ ...form, origin_name: e.target.value })} />
+              <input className="input" value={form.origin_name} onChange={(e) => setForm({ ...form, origin_name: e.target.value })} />
             </label>
             <label className="field">
               <span>{t("rd.address")}</span>
-              <input className="input" list="route-address-suggestions" value={form.origin_address} onChange={(e) => setForm({ ...form, origin_address: e.target.value })} />
+              <input className="input" value={form.origin_address} onChange={(e) => setForm({ ...form, origin_address: e.target.value })} />
             </label>
             <label className="field">
               <span>{t("route.driver")}</span>
@@ -490,17 +491,55 @@ export default function RoutesPage() {
               </select>
             </label>
           </div>
-          <SuggestionList id="route-code-suggestions" values={suggestions.codigo_ut} />
-          <SuggestionList id="route-origin-suggestions" values={suggestions.origins} />
-          <SuggestionList id="route-address-suggestions" values={suggestions.addresses} />
           <div style={{ marginTop: 12 }}>
             <button type="submit" className="btn-primary">{t("common.save")}</button>
             <button type="button" className="btn-ghost" onClick={() => setEditing(null)}>{t("common.cancel")}</button>
           </div>
         </form>
+        </div>
       )}
 
-      <div className={`planning-board${selectedRouteId ? " has-selected-route" : ""}${routeListExpanded ? " is-route-list-expanded" : ""}`}>
+      {routeView === "assignments" && canUseManagementView ? (
+        <section className="assignment-board">
+          <div className="card-panel assignment-filters">
+            <div>
+              <strong>Painel de atribuições</strong>
+              <span>Planeje motoristas e veículos e acompanhe o andamento das rotas.</span>
+            </div>
+            <label><span>Data programada</span><input className="input" type="date" value={assignmentDate} onChange={(e) => setAssignmentDate(e.target.value)} /></label>
+            <label className="assignment-search"><span>Buscar</span><input className="input" placeholder="Rota, cliente, motorista ou veículo" value={assignmentSearch} onChange={(e) => setAssignmentSearch(e.target.value)} /></label>
+          </div>
+          <div className="assignment-summary">
+            <div><strong>{assignmentRoutes.length}</strong><span>Rotas listadas</span></div>
+            <div className="is-success"><strong>{assignedRoutes}</strong><span>Atribuídas</span></div>
+            <div className="is-warning"><strong>{assignmentRoutes.length - assignedRoutes}</strong><span>Pendentes</span></div>
+            <div><strong>{routeStats.road}</strong><span>Em rota</span></div>
+          </div>
+          <div className="card-panel assignment-table-card">
+            <div className="assignment-table-head"><div><strong>Lista de rotas</strong><span>{assignmentRoutes.length} resultado(s)</span></div></div>
+            <div className="table-wrap">
+              <table className="data-table assignment-table">
+                <thead><tr><th>Rota</th><th>Cliente / origem</th><th>Data</th><th>Motorista</th><th>Veículo</th><th>Andamento</th><th>Entregas</th><th>Ações</th></tr></thead>
+                <tbody>
+                  {assignmentRoutes.map((route) => (
+                    <tr key={route.id}>
+                      <td><button className="route-code" onClick={() => navigate(`/routes/${route.id}`)}>{route.codigo_ut}</button></td>
+                      <td><strong>{routeCustomers(route)}</strong><small>{route.origin_name ?? "Origem não informada"}</small></td>
+                      <td>{formatDate(route.route_date)}</td>
+                      <td className={!route.driver_id ? "assignment-pending" : ""}>{route.driver_id ? driverName(route.driver_id) : "A definir"}</td>
+                      <td className={!route.vehicle_id ? "assignment-pending" : ""}>{route.vehicle_id ? vehiclePlate(route.vehicle_id) : "A definir"}</td>
+                      <td><span className="status-pill" style={{ background: STATUS_COLOR[route.status] ?? "#667085" }}>{t(`route_status.${route.status}`, { defaultValue: route.status })}</span></td>
+                      <td>{route.stops.length}</td>
+                      <td><div className="assignment-actions"><button className="btn-mini" onClick={() => { setSelectedRouteId(route.id); setRouteView("map"); }}>Ver rota</button><button className="btn-mini assignment-scale" onClick={() => startEdit(route)}><AssignmentIcon /> Escalar</button></div></td>
+                    </tr>
+                  ))}
+                  {!assignmentRoutes.length && <tr><td colSpan={8} className="empty-state">Nenhuma rota encontrada para os filtros selecionados.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      ) : <div className={`planning-board${selectedRouteId ? " has-selected-route" : ""}${routeListExpanded ? " is-route-list-expanded" : ""}`}>
         <aside className="card-panel route-list-panel">
           <div className="route-list-head">
             <div>
@@ -560,6 +599,7 @@ export default function RoutesPage() {
                 <div className="route-meta">{r.stops.length} {t("route.deliveries")} · #{index + 1}</div>
                 <div className="route-actions">
                   {canEdit && <button className="btn-mini" onClick={(e) => { e.stopPropagation(); startEdit(r); }}>{t("users.edit")}</button>}
+                  {canEdit && <button className="btn-mini assignment-scale" onClick={(e) => { e.stopPropagation(); startEdit(r); }}><AssignmentIcon /> Escalar</button>}
                   {canRegisterToll && (
                     <button className="btn-icon toll" title={t("rd.add_toll")} onClick={(e) => { e.stopPropagation(); openToll(r.id); }}>
                       <TollIcon />
@@ -610,12 +650,6 @@ export default function RoutesPage() {
                 <div className="route-meta">
                   {visibleSelectedRoute ? `${routeLabel(visibleSelectedRoute)} · ${visibleSelectedRoute.stops.length} ${t("route.deliveries").toLowerCase()}` : t("route.select_route")}
                 </div>
-                {selectedRouteManifest && (
-                  <div className="manifest-status">
-                    <span>{selectedRouteManifest.original_filename}</span>
-                    <strong>{t(`manifest_status.${selectedRouteManifest.status}`, { defaultValue: selectedRouteManifest.status })}</strong>
-                  </div>
-                )}
               </div>
               {visibleSelectedRoute && (
                 <div className="route-toolbar">
@@ -718,7 +752,7 @@ export default function RoutesPage() {
             </div>
           </div>
         </section>
-      </div>
+      </div>}
 
       {proofStop && (
         <div className="modal-backdrop" onClick={() => { if (!proofSaving) setProofStop(null); }}>
@@ -735,7 +769,7 @@ export default function RoutesPage() {
                 file={proofFile}
                 label={t("common.attach_proof")}
                 selectedLabel={t("common.selected_file")}
-                onChange={setProofFile}
+                onChange={async (file) => setProofFile(file ? await applyTimemark(file) : null)}
               />
             </div>
             <div className="modal-actions">
@@ -770,7 +804,7 @@ export default function RoutesPage() {
                       file={warehouseBatchFiles[stop.id] ?? null}
                       label={t("common.attach_proof")}
                       selectedLabel={t("common.selected_file")}
-                      onChange={(file) => setWarehouseBatchFiles((current) => ({ ...current, [stop.id]: file }))}
+                      onChange={async (file) => { const marked = file ? await applyTimemark(file) : null; setWarehouseBatchFiles((current) => ({ ...current, [stop.id]: marked })); }}
                     />
                   </div>
                 );
@@ -828,7 +862,7 @@ export default function RoutesPage() {
                 file={failFile}
                 label={t("common.attach_proof")}
                 selectedLabel={t("common.selected_file")}
-                onChange={setFailFile}
+                onChange={async (file) => setFailFile(file ? await applyTimemark(file) : null)}
               />
             </div>
             <label className="field">
@@ -959,6 +993,14 @@ function ListIcon() {
   );
 }
 
+function MapViewIcon() {
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></svg>;
+}
+
+function AssignmentIcon() {
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>;
+}
+
 function UploadField({
   id,
   name,
@@ -1031,14 +1073,6 @@ function dueTime(date?: string | null, time?: string | null) {
 
 function compareStopsBySequence(a: Stop, b: Stop) {
   return (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id;
-}
-
-function SuggestionList({ id, values }: { id: string; values: string[] }) {
-  return (
-    <datalist id={id}>
-      {values.map((value) => <option key={`${id}-${value}`} value={value} />)}
-    </datalist>
-  );
 }
 
 interface ImportResult {
@@ -1122,6 +1156,11 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
 function routeLabel(route: { codigo_ut: string; route_date: string }) {
   const [year, month, day] = route.route_date.split("-");
   return year && month && day ? `${day}/${month} - ${route.codigo_ut}` : route.codigo_ut;
+}
+
+function formatDate(value: string) {
+  const [year, month, day] = value.split("-");
+  return year && month && day ? `${day}/${month}/${year}` : value;
 }
 
 function formatCurrency(value: number, locale = "pt-BR") {

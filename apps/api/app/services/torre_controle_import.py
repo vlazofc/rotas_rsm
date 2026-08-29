@@ -24,7 +24,7 @@ import openpyxl
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Branch, Driver, Expense, Revenue, Route, RouteStop, Tenant, Vehicle, VehicleType
+from app.db.models import Branch, Driver, Expense, FinancialAccount, Revenue, Route, RouteStop, Tenant, Vehicle, VehicleType
 from app.db.session import SessionLocal
 from app.services.routing import calculate_round_trip_km, map_vehicle
 
@@ -372,12 +372,27 @@ def import_workbook(source: Path | str | BinaryIO, branch_id: int | None = None,
                 )
                 if existing_revenue is not None:
                     existing_revenue.amount = frete
+                    revenue = existing_revenue
                 else:
-                    db.add(Revenue(
+                    revenue = Revenue(
                         branch_id=branch.id, route_id=route.id, revenue_date=route_date,
                         amount=frete, notes="Frete (importado)", source="import",
-                    ))
+                    )
+                    db.add(revenue)
                     stats["revenues_created"] += 1
+                db.flush()
+                account = db.scalar(select(FinancialAccount).where(FinancialAccount.revenue_id == revenue.id))
+                if account is None:
+                    account = FinancialAccount(
+                        branch_id=branch.id, kind="receivable", description=f"Receita da rota {route.codigo_ut}",
+                        counterparty="Cliente da rota", category="frete", document=f"ROTA-{route.codigo_ut}",
+                        issue_date=route_date, due_date=max(route_date, date.today()), amount=frete,
+                        status="pendente", notes=revenue.notes, revenue_id=revenue.id,
+                    )
+                    db.add(account)
+                elif account.status == "pendente":
+                    account.amount, account.issue_date = frete, route_date
+                    account.due_date = max(route_date, date.today())
 
             if driver:
                 valor_motorista = None  # planilha não tem "Valor Motorista" nas abas atuais

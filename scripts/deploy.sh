@@ -10,6 +10,10 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+# Reduz a exposição local de credenciais antes de qualquer comando Docker.
+chmod 600 .env
+sh scripts/check_secrets.sh
+
 echo "==> git pull (se for repositório)"
 git pull --ff-only 2>/dev/null || echo "(sem git remoto, seguindo)"
 

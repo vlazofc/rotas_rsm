@@ -10,6 +10,7 @@ geoalchemy2==0.16.0
 redis==5.2.1
 celery==5.4.0
 python-jose[cryptography]==3.3.0
+cryptography>=44.0.0,<46.0.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.20
@@ -21,3 +22,5 @@ slowapi==0.1.9
 openpyxl==3.1.5
 msal==1.31.1
 python-dateutil==2.9.0.post0
+reportlab==4.2.5
+pytest==8.3.4

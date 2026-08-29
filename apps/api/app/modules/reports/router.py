@@ -12,15 +12,59 @@ from pydantic import BaseModel
 from sqlalchemy import extract, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.permissions import Role, require_roles
+from app.core.permissions import FINANCE_VIEW, Role, require_permission, require_roles
 from app.db.models import (
-    Attachment, AuditLog, DeliveryFailureReason, Driver, Expense, Revenue, Route, RouteStop, User, Vehicle,
+    Attachment, AuditLog, DeliveryFailureReason, Driver, Expense, FinancialAccount, MaintenanceOrder,
+    Part, Revenue, Route, RouteOccurrence, RouteStop, Tire, User, Vehicle, WorkflowTask,
 )
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services import storage
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+@router.get("/overview", dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))])
+def overview_report(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Resumo gerencial multiárea para a central de relatórios."""
+    def branch(stmt, model):
+        return stmt.where(model.branch_id == user.branch_id) if user.branch_id else stmt
+
+    route_stmt=branch(select(Route),Route)
+    expense_stmt=branch(select(Expense).where(Expense.approval_status=="approved"),Expense)
+    revenue_stmt=branch(select(Revenue),Revenue)
+    account_stmt=branch(select(FinancialAccount),FinancialAccount)
+    if start:
+        route_stmt=route_stmt.where(Route.route_date>=start);expense_stmt=expense_stmt.where(Expense.expense_date>=start)
+        revenue_stmt=revenue_stmt.where(Revenue.revenue_date>=start);account_stmt=account_stmt.where(FinancialAccount.issue_date>=start)
+    if end:
+        route_stmt=route_stmt.where(Route.route_date<=end);expense_stmt=expense_stmt.where(Expense.expense_date<=end)
+        revenue_stmt=revenue_stmt.where(Revenue.revenue_date<=end);account_stmt=account_stmt.where(FinancialAccount.issue_date<=end)
+    routes=list(db.scalars(route_stmt).all());expenses=list(db.scalars(expense_stmt).all());revenues=list(db.scalars(revenue_stmt).all());accounts=list(db.scalars(account_stmt).all())
+
+    def sum_by(rows,key,value):
+        result={}
+        for row in rows:
+            label=str(key(row) or "Não informado");result[label]=round(result.get(label,0)+float(value(row) or 0),2)
+        return [{"label":label,"value":value} for label,value in sorted(result.items(),key=lambda item:item[1],reverse=True)]
+
+    vehicle_ids={row.vehicle_id for row in expenses if row.vehicle_id};vehicles={v.id:v.plate for v in db.scalars(select(Vehicle).where(Vehicle.id.in_(vehicle_ids))).all()} if vehicle_ids else {}
+    route_status={};
+    for row in routes:route_status[row.status]=route_status.get(row.status,0)+1
+    revenue_total=round(sum(float(row.amount or 0) for row in revenues),2);expense_total=round(sum(float(row.amount or 0) for row in expenses),2)
+    pending_payable=sum(float(row.amount or 0) for row in accounts if row.kind=="payable" and row.status not in {"paga","cancelada"})
+    pending_receivable=sum(float(row.amount or 0) for row in accounts if row.kind=="receivable" and row.status not in {"recebida","cancelada"})
+
+    occurrence_stmt=branch(select(RouteOccurrence),RouteOccurrence);task_stmt=branch(select(WorkflowTask),WorkflowTask);maintenance_stmt=branch(select(MaintenanceOrder),MaintenanceOrder);tire_stmt=branch(select(Tire),Tire);part_stmt=branch(select(Part),Part)
+    occurrences=list(db.scalars(occurrence_stmt).all());tasks=list(db.scalars(task_stmt).all());maintenance=list(db.scalars(maintenance_stmt).all());tires=list(db.scalars(tire_stmt).all());parts=list(db.scalars(part_stmt).all())
+    today=date.today()
+    return {
+        "period":{"start":start,"end":end},
+        "operation":{"routes":len(routes),"completed":sum(1 for row in routes if row.status=="finalizada"),"in_transit":sum(1 for row in routes if row.status=="em_rota"),"cancelled":sum(1 for row in routes if row.status=="cancelada"),"completion_rate":round(100*sum(1 for row in routes if row.status=="finalizada")/len(routes),1) if routes else 0,"km_total":round(sum(float(row.km_total_informed or 0) for row in routes),1),"tolls":round(sum(float(row.toll_outbound or 0)+float(row.toll_return or 0) for row in routes),2),"by_status":[{"label":key,"value":value} for key,value in route_status.items()]},
+        "finance":{"revenue":revenue_total,"expense":expense_total,"result":round(revenue_total-expense_total,2),"margin":round(100*(revenue_total-expense_total)/revenue_total,1) if revenue_total else 0,"payable":round(pending_payable,2),"receivable":round(pending_receivable,2),"expenses_by_category":sum_by(expenses,lambda row:row.reason,lambda row:row.amount),"expenses_by_vehicle":sum_by(expenses,lambda row:vehicles.get(row.vehicle_id,"Sem veículo"),lambda row:row.amount)},
+        "control":{"occurrences_open":sum(1 for row in occurrences if row.status not in {"finalizada","resolvida"}),"tasks_open":sum(1 for row in tasks if row.status=="open"),"tasks_in_progress":sum(1 for row in tasks if row.status=="in_progress"),"tasks_returned":sum(1 for row in tasks if row.status=="returned")},
+        "fleet":{"maintenance_open":sum(1 for row in maintenance if row.status in {"aberta","em_andamento"}),"maintenance_overdue":sum(1 for row in maintenance if row.status not in {"concluida","cancelada"} and row.expected_completion_date and row.expected_completion_date<today),"tires_total":len(tires),"tires_attention":sum(1 for row in tires if row.status!="descartado" and row.tread_depth_mm is not None and row.tread_depth_mm<=3),"parts_low":sum(1 for row in parts if row.quantity<=row.minimum_quantity),"stock_value":round(sum(float(row.quantity or 0)*float(row.average_cost or 0) for row in parts),2)},
+    }
 
 
 class ProofReportOut(BaseModel):
@@ -99,6 +143,7 @@ def _proof_rows(db: Session, user: User, start: date | None, end: date | None) -
 def _expense_rows(db: Session, user: User, start: date | None, end: date | None) -> list[Expense]:
     stmt = (
         select(Expense)
+        .where(Expense.approval_status == "approved")
         .options(selectinload(Expense.driver), selectinload(Expense.attachment))
         .options(selectinload(Expense.vehicle))
         .order_by(Expense.expense_date.desc(), Expense.id.desc())
@@ -153,7 +198,7 @@ def export_routes_xlsx(
         "Rota ID", "Codigo UT", "Data da rota", "Status", "Origem", "Morada origem",
         "Motorista", "Veiculo", "Entrega seq.", "Cliente", "Cidade", "Morada cliente",
         "Data planejada", "Hora planejada", "Status entrega", "Pedido", "Peso kg",
-        "Paletes", "Portagem ida", "Portagem volta", "KM total", "Tipo devolução",
+        "Paletes", "Tipo de parada", "Portagem ida", "Portagem volta", "KM total", "Tipo devolução",
         "Quantidade devolvida", "Comprovante entrega", "Comprovante devolução armazém",
     ]
     sheet.append(headers)
@@ -180,6 +225,7 @@ def export_routes_xlsx(
             stop.order_number if stop else None,
             stop.weight_kg if stop else None,
             stop.pallets if stop else None,
+            stop.stop_type if stop else None,
             float(route.toll_outbound) if route.toll_outbound is not None else None,
             float(route.toll_return) if route.toll_return is not None else None,
             route.km_total_informed,
@@ -498,7 +544,7 @@ class BalanceteOut(BaseModel):
     by_route: list[BalanceteRouteRow]
 
 
-_FINANCEIRO = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO)
+_FINANCEIRO = require_permission(FINANCE_VIEW, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO)
 
 
 @router.get("/balancete", response_model=BalanceteOut, dependencies=[Depends(_FINANCEIRO)])
@@ -514,6 +560,7 @@ def balancete(month: str, db: Session = Depends(get_db), user: User = Depends(ge
     )
     expense_stmt = select(Expense).where(
         extract("year", Expense.expense_date) == year, extract("month", Expense.expense_date) == month_num,
+        Expense.approval_status == "approved",
     )
     if user.branch_id:
         revenue_stmt = revenue_stmt.where(Revenue.branch_id == user.branch_id)

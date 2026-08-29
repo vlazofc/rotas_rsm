@@ -6,12 +6,11 @@ Brasil e o admin semente. Para migrações versionadas use Alembic (já no requi
 
 ## Tabelas
 `tenants, branches, users, customers, carriers, drivers, vehicles, routes, route_stops, dock_sessions,
-route_events, manifests, ocr_results, checkins, delivery_proofs, tolls,
+route_events, checkins, delivery_proofs, tolls,
 odometer_readings, attachments, audit_logs, notifications`
 
 ## Relações principais
 - `routes` 1—N `route_stops`, 1—N `route_events`, 1—1 `dock_sessions`.
-- `manifests` 1—1 `ocr_results`; `manifests.route_id` → rota gerada.
 - `route_stops.proof_attachment_id` → `attachments` (comprovante).
 - Entidades SaaS são escopadas por `tenant_id`; entidades operacionais também
   mantêm `branch_id`. O backend valida a cadeia `usuário → filial → tenant`.

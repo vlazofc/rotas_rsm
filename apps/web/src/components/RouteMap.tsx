@@ -133,21 +133,47 @@ export default function RouteMap({ routes, selectedRouteId, onSelectRoute }: {
 
     layer.clearLayers();
     const bounds = L.latLngBounds([]);
+    const selectedBounds = L.latLngBounds([]);
 
-    points.forEach(({ route, stop, label, position }) => {
+    const orderedRoutes = [...routes].sort((a, b) => Number(a.id === selectedRouteId) - Number(b.id === selectedRouteId));
+    orderedRoutes.forEach((route) => {
+      const routePoints = points.filter((point) => point.route.id === route.id);
+      const positions = routePoints.map((point) => point.position);
+      const selected = route.id === selectedRouteId;
+      if (positions.length >= 2) {
+        const line = L.polyline(positions, {
+          color: selected ? "#087f6d" : "#64748b",
+          weight: selected ? 6 : 3,
+          opacity: selectedRouteId === null || selected ? 0.9 : 0.18,
+          dashArray: selected ? undefined : "7 8",
+          lineCap: "round",
+          lineJoin: "round",
+        }).on("click", () => onSelectRoute(route.id)).addTo(layer);
+        if (selected) line.bringToFront();
+      }
+      positions.forEach((position) => {
+        bounds.extend(position);
+        if (selected) selectedBounds.extend(position);
+      });
+    });
+
+    const orderedPoints = [...points].sort((a, b) => Number(a.route.id === selectedRouteId) - Number(b.route.id === selectedRouteId));
+    orderedPoints.forEach(({ route, stop, label, position }) => {
       const selected = route.id === selectedRouteId;
       const dimmed = selectedRouteId !== null && !selected;
       const marker = L.marker(position, {
         icon: markerIcon(STOP_STATUS_COLOR[stop.status] ?? "#12a386", label, selected, stop.status, dimmed),
         title: `${route.codigo_ut} - ${stop.customer_name}`,
+        zIndexOffset: selected ? 1000 : dimmed ? -500 : 0,
       });
       marker.bindPopup(`<strong>${route.codigo_ut}</strong><br>${escapeHtml(stop.customer_name)}${stop.city ? `<br>${escapeHtml(stop.city)}` : ""}`);
       marker.on("click", () => onSelectRoute(route.id));
       marker.addTo(layer);
-      bounds.extend(position);
     });
 
-    if (bounds.isValid() && points.some((point) => point.real)) {
+    if (selectedBounds.isValid()) {
+      map.fitBounds(selectedBounds.pad(0.35), { maxZoom: 11, animate: true });
+    } else if (bounds.isValid() && points.some((point) => point.real)) {
       map.fitBounds(bounds.pad(0.35), { maxZoom: 10 });
     } else if (bounds.isValid() && routes.length > 0) {
       map.fitBounds(bounds.pad(0.35), { maxZoom: 11 });

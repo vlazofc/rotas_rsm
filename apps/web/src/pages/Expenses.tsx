@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import api from "../services/api";
+import {appConfirm} from "../components/AppDialog";
 import { useAuth } from "../context/AuthContext";
 
 interface Driver {
@@ -17,7 +18,7 @@ interface Vehicle {
 
 interface Expense {
   id: number;
-  driver_id: number;
+  driver_id?: number | null;
   driver_name?: string | null;
   vehicle_id?: number | null;
   vehicle_plate?: string | null;
@@ -32,7 +33,17 @@ interface Expense {
   odometer_photo_filename?: string | null;
   odometer_photo_url?: string | null;
   created_at: string;
+  source?: string;
+  maintenance_order_id?: number | null;
+  approval_status?: string;
+  decision_note?: string | null;
+  reviewer_name?: string | null;
+  reviewed_at?: string | null;
+  due_date?: string | null;
+  recurrence?: string;
+  recurrence_count?: number;
 }
+interface ExpenseCategory { code: string; name: string; }
 
 const REASON_VALUES = ["combustivel", "manutencao", "limpeza", "outros"];
 
@@ -42,11 +53,13 @@ function currentMonth() {
 
 export default function Expenses() {
   const { t, i18n } = useTranslation();
-  const { hasRole } = useAuth();
+  const { user, hasRole } = useAuth();
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [categories, setCategories] = useState<ExpenseCategory[]>([]);
   const [month, setMonth] = useState(currentMonth());
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [editing, setEditing] = useState<Expense | "new" | null>(null);
   const [form, setForm] = useState({
     expense_date: new Date().toISOString().slice(0, 10),
@@ -59,9 +72,13 @@ export default function Expenses() {
     odometer_km: "",
     proof: null as File | null,
     odometer_photo: null as File | null,
+    due_date: "",
+    recurrence: "none",
+    recurrence_count: "1",
   });
   const [error, setError] = useState("");
   const isFuel = form.reason === "combustivel";
+  const isDriver = user?.role === "motorista";
 
   const canManageDrivers = hasRole("admin_global", "gestor_brasil", "gestor_financeiro");
   const canDownloadBatch = hasRole("admin_global");
@@ -86,10 +103,14 @@ export default function Expenses() {
 
   useEffect(() => {
     api.get<Vehicle[]>("/vehicles").then((r) => setVehicles(r.data)).catch(() => setVehicles([]));
+    api.get<ExpenseCategory[]>("/expenses/categories").then((r) => setCategories(r.data)).catch(() => setCategories([]));
   }, []);
 
+  const visibleExpenses = useMemo(() => expenses.filter(expense => !categoryFilter || expense.reason === categoryFilter), [expenses, categoryFilter]);
+  const categoryName = (code: string) => categories.find(category => category.code === code)?.name || (REASON_VALUES.includes(code) ? t(`exp.reasons.${code}`) : code);
+
   const total = useMemo(
-    () => expenses.reduce((acc, item) => acc + Number(item.amount ?? 0), 0),
+    () => expenses.filter(item => item.approval_status === "approved").reduce((acc, item) => acc + Number(item.amount ?? 0), 0),
     [expenses],
   );
 
@@ -97,7 +118,7 @@ export default function Expenses() {
     setError("");
     setForm({
       expense_date: new Date().toISOString().slice(0, 10),
-      reason: "combustivel",
+      reason: categories[0]?.code || "combustivel",
       amount: "",
       notes: "",
       route_id: "",
@@ -106,6 +127,9 @@ export default function Expenses() {
       odometer_km: "",
       proof: null,
       odometer_photo: null,
+      due_date: "",
+      recurrence: "none",
+      recurrence_count: "1",
     });
     setEditing("new");
   }
@@ -118,11 +142,14 @@ export default function Expenses() {
       amount: expense.amount ? String(expense.amount) : "",
       notes: expense.notes ?? "",
       route_id: expense.route_id ? String(expense.route_id) : "",
-      driver_id: String(expense.driver_id),
+      driver_id: expense.driver_id ? String(expense.driver_id) : "",
       vehicle_id: expense.vehicle_id ? String(expense.vehicle_id) : "",
       odometer_km: expense.odometer_km ? String(expense.odometer_km) : "",
       proof: null,
       odometer_photo: null,
+      due_date: expense.due_date ?? "",
+      recurrence: expense.recurrence ?? "none",
+      recurrence_count: String(expense.recurrence_count ?? 1),
     });
     setEditing(expense);
   }
@@ -134,7 +161,7 @@ export default function Expenses() {
       setError(t("exp.err_no_proof"));
       return;
     }
-    if (editing === "new" && !form.vehicle_id) {
+    if (editing === "new" && (isDriver||isFuel) && !form.vehicle_id) {
       setError(t("exp.err_no_plate"));
       return;
     }
@@ -157,6 +184,8 @@ export default function Expenses() {
     if (form.odometer_km) payload.set("odometer_km", form.odometer_km);
     if (form.proof) payload.set("proof", form.proof);
     if (form.odometer_photo) payload.set("odometer_photo", form.odometer_photo);
+    if (!isDriver && form.due_date) payload.set("due_date", form.due_date);
+    if (!isDriver) { payload.set("recurrence", form.recurrence); payload.set("recurrence_count", form.recurrence_count); }
     try {
       if (editing === "new") {
         await api.post("/expenses", payload);
@@ -171,7 +200,7 @@ export default function Expenses() {
   }
 
   async function remove(expense: Expense) {
-    if (!confirm(t("exp.delete_confirm", { id: expense.id }) ?? "")) return;
+    if (!await appConfirm(t("exp.delete_confirm", { id: expense.id }) ?? "",{title:"Excluir despesa",confirmLabel:"Sim, excluir",danger:true})) return;
     try {
       await api.delete(`/expenses/${expense.id}`);
       reload();
@@ -203,7 +232,7 @@ export default function Expenses() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 11, color: "#64748b", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em" }}>{t("exp.total_month")}</div>
+            <div style={{ fontSize: 11, color: "#64748b", fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em" }}>TOTAL APROVADO NO MÊS</div>
             <strong style={{ fontSize: 22, color: "#059669" }}>{formatCurrency(total, i18n.language)}</strong>
           </div>
           <button className="btn-primary btn-add" onClick={startNew}><span className="btn-add-symbol">+</span><span>{t("exp.new")}</span></button>
@@ -217,6 +246,7 @@ export default function Expenses() {
           <span>{t("exp.month")}</span>
           <input className="input" type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
         </label>
+        <label className="field"><span>Categoria</span><select className="input" value={categoryFilter} onChange={(e)=>setCategoryFilter(e.target.value)}><option value="">Todas as categorias</option>{categories.map(category=><option key={category.code} value={category.code}>{category.name}</option>)}</select></label>
         <div className="expense-actions">
           <button className="btn-icon-label" title={t("exp.export_expenses")} onClick={() => downloadBlob("/expenses/export.xlsx", `despesas-${month}.xlsx`, { month })}>
             <IconExcel /> <span>{t("exp.btn_expenses")}</span>
@@ -235,8 +265,9 @@ export default function Expenses() {
       </section>
 
       {editing && (
-        <form className="card-panel form-panel" onSubmit={save}>
-          <h3 style={{ marginTop: 0 }}>{editing === "new" ? t("exp.new") : t("exp.edit")}</h3>
+        <div className="modal-backdrop" onClick={()=>setEditing(null)}><form className="modal-card expense-modal" onSubmit={save} onClick={event=>event.stopPropagation()}>
+          <h3 style={{ marginTop: 0 }}>{editing === "new" ? (isDriver?"Nova despesa da viagem":"Nova despesa administrativa") : t("exp.edit")}</h3>
+          <p>{isDriver?"Registre seu gasto operacional com veículo e comprovante.":"Motorista e rota são opcionais para lançamentos administrativos."}</p>
           <div className="form-grid">
             <label className="field">
               <span>{t("exp.date")}</span>
@@ -245,7 +276,7 @@ export default function Expenses() {
             <label className="field">
               <span>{t("exp.reason")}</span>
               <select className="input" required value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })}>
-                {REASON_VALUES.map((value) => <option key={value} value={value}>{t(`exp.reasons.${value}`)}</option>)}
+                {categories.map(category => <option key={category.code} value={category.code}>{category.name}</option>)}
               </select>
             </label>
             <label className="field">
@@ -254,11 +285,11 @@ export default function Expenses() {
             </label>
             <label className="field">
               <span>{t("exp.route")}</span>
-              <input className="input" type="number" min="1" value={form.route_id} onChange={(e) => setForm({ ...form, route_id: e.target.value })} />
+              <input className="input" type="number" min="1" placeholder={isDriver?"ID da sua rota":"Opcional"} value={form.route_id} onChange={(e) => setForm({ ...form, route_id: e.target.value })} />
             </label>
             <label className="field">
               <span>{t("exp.vehicle_plate")}</span>
-              <select className="input" required={editing === "new"} value={form.vehicle_id} onChange={(e) => setForm({ ...form, vehicle_id: e.target.value })}>
+              <select className="input" required={editing === "new"&&(isDriver||isFuel)} value={form.vehicle_id} onChange={(e) => setForm({ ...form, vehicle_id: e.target.value })}>
                 <option value="">{t("exp.select_plate")}</option>
                 {vehicles.filter((vehicle) => vehicle.active).map((vehicle) => (
                   <option key={vehicle.id} value={vehicle.id}>
@@ -267,11 +298,11 @@ export default function Expenses() {
                 ))}
               </select>
             </label>
-            {canManageDrivers && (
+            {canManageDrivers && Boolean(form.route_id) && (
               <label className="field">
-                <span>{t("exp.driver")}</span>
-                <select className="input" value={form.driver_id} onChange={(e) => setForm({ ...form, driver_id: e.target.value })}>
-                  <option value="">{t("exp.use_linked_driver")}</option>
+                <span>{t("exp.driver")} {form.route_id ? "*" : "(opcional)"}</span>
+                <select className="input" required={Boolean(form.route_id)} value={form.driver_id} onChange={(e) => setForm({ ...form, driver_id: e.target.value })}>
+                  <option value="">Sem motorista</option>
                   {drivers.filter((d) => d.active).map((driver) => <option key={driver.id} value={driver.id}>{driver.name}</option>)}
                 </select>
               </label>
@@ -316,16 +347,18 @@ export default function Expenses() {
                 </div>
               </>
             )}
+            {!isDriver && editing === "new" && <><label className="field"><span>Primeiro vencimento</span><input className="input" type="date" value={form.due_date} onChange={e=>setForm({...form,due_date:e.target.value})}/></label><label className="field"><span>Recorrência</span><select className="input" value={form.recurrence} onChange={e=>setForm({...form,recurrence:e.target.value,recurrence_count:e.target.value==="none"?"1":form.recurrence_count})}><option value="none">Não recorrente</option><option value="monthly">Mensal</option><option value="quarterly">Trimestral</option><option value="semiannual">Semestral</option><option value="annual">Anual</option></select></label>{form.recurrence!=="none"&&<label className="field"><span>Quantidade de ocorrências</span><input className="input" type="number" min="2" max="120" required value={form.recurrence_count} onChange={e=>setForm({...form,recurrence_count:e.target.value})}/></label>}</>}
           </div>
           <label className="field" style={{ marginTop: 10 }}>
             <span>{t("exp.notes")}</span>
             <textarea className="input" style={{ minHeight: 74, resize: "vertical" }} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
           </label>
+          {error&&<p className="modal-error">{error}</p>}
           <div className="modal-actions">
             <button className="btn-primary" type="submit">{t("common.save")}</button>
             <button className="btn-ghost" type="button" onClick={() => setEditing(null)}>{t("common.cancel")}</button>
           </div>
-        </form>
+        </form></div>
       )}
 
       <div className="table-scroll">
@@ -340,16 +373,17 @@ export default function Expenses() {
               <th>{t("exp.table_odometer")}</th>
               <th>{t("exp.route")}</th>
               <th>{t("exp.proof")}</th>
+              <th>Status financeiro</th>
               <th>{t("users.actions")}</th>
             </tr>
           </thead>
           <tbody>
-            {expenses.map((expense) => (
+            {visibleExpenses.map((expense) => (
               <tr key={expense.id}>
                 <td>{expense.expense_date}</td>
-                <td>{expense.driver_name ?? "-"}</td>
+                <td>{expense.driver_name ?? <span className="expense-admin-label">Administrativo</span>}</td>
                 <td>{expense.vehicle_plate ?? "-"}</td>
-                <td>{REASON_VALUES.includes(expense.reason) ? t(`exp.reasons.${expense.reason}`) : expense.reason}</td>
+                <td>{categoryName(expense.reason)}{expense.maintenance_order_id&&<small className="expense-source">OS #{expense.maintenance_order_id}</small>}</td>
                 <td>{expense.amount ? formatCurrency(Number(expense.amount), i18n.language) : "-"}</td>
                 <td>
                   {expense.odometer_km != null ? `${expense.odometer_km} km` : "-"}
@@ -361,15 +395,15 @@ export default function Expenses() {
                 <td>
                   {expense.proof_url ? <a href={expense.proof_url} target="_blank" rel="noreferrer">{expense.proof_filename ?? t("exp.open")}</a> : "-"}
                 </td>
+                <td><span className={`stock-badge ${expense.approval_status === "approved" ? "ok" : expense.approval_status === "rejected" ? "danger" : "warning"}`}>{({ pending: "Pendente", in_review: "Em análise", adjustment_requested: "Ajuste solicitado", approved: "Aprovada", rejected: "Recusada" } as Record<string,string>)[expense.approval_status || "pending"]}</span>{expense.decision_note && <small className="expense-source" title={expense.decision_note}>{expense.decision_note}</small>}</td>
                 <td>
-                  <button className="btn-mini" onClick={() => startEdit(expense)}>{t("users.edit")}</button>
-                  <button className="btn-mini danger" onClick={() => remove(expense)}>{t("common.delete")}</button>
+                  {expense.maintenance_order_id ? <span className="stock-badge ok">Gerenciada pela OS</span> : ["pending", "adjustment_requested"].includes(expense.approval_status || "pending") ? <><button className="btn-mini" onClick={() => startEdit(expense)}>{expense.approval_status === "adjustment_requested" ? "Corrigir e reenviar" : t("users.edit")}</button><button className="btn-mini danger" onClick={() => remove(expense)}>{t("common.delete")}</button></> : <span className="expense-source">Registro bloqueado</span>}
                 </td>
               </tr>
             ))}
-            {expenses.length === 0 && (
+            {visibleExpenses.length === 0 && (
               <tr>
-                <td colSpan={9} className="empty-state">{t("exp.empty")}</td>
+                <td colSpan={10} className="empty-state">{t("exp.empty")}</td>
               </tr>
             )}
           </tbody>

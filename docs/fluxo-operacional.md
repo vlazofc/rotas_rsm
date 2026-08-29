@@ -5,7 +5,7 @@
 
 ## Eventos auditáveis (`route_events.event_type`)
 `ARRIVED_CD, ENTERED_DOCK, LOADING_STARTED, LOADING_FINISHED, OPERATOR_RELEASED,
-MANIFEST_RECEIVED, MANIFEST_VALIDATED, DEPARTED_CD, ARRIVED_STOP, DELIVERED,
+DEPARTED_CD, ARRIVED_STOP, DELIVERED,
 FAILED_DELIVERY, RETURN_STARTED, RETURN_COMPLETED, ROUTE_CLOSED`
 
 ## Endpoints do fluxo (API)
@@ -27,10 +27,9 @@ FAILED_DELIVERY, RETURN_STARTED, RETURN_COMPLETED, ROUTE_CLOSED`
 - `waiting_release_minutes` = fim carregamento → liberação
 - `total_cd_minutes` = chegada CD → saída do CD
 
-## Manifesto (Fase 2)
-`upload → PROCESSANDO_OCR → AGUARDANDO_CONFERENCIA → CONFERIDO → ROTA_GERADA`.
-O OCR gera pré-rota com confiança; a rota só nasce após conferência humana
-(`POST /manifests/{id}/confirm` e `/generate-route`).
+## Entrada de rotas
+As rotas são criadas manualmente, importadas por planilha ou sincronizadas pela
+integração autorizada. Não existe processamento automático de documentos.
 
 ## Rótulos i18n sensíveis
 - F.Entr → **pt-BR:** "Data limite de entrega" · **pt-PT:** "Data limite de entrada/entrega"

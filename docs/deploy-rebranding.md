@@ -8,19 +8,19 @@ servidor). Isso agora é controlado num único lugar: o campo `name:` no topo do
 **Importante:** só trocar esse nome e rodar `docker compose up` de novo **não
 é seguro por si só** — por padrão, os volumes (Postgres, Redis, MinIO, Caddy)
 são nomeados com o prefixo do projeto. Um projeto novo criaria volumes novos e
-vazios, e os dados atuais (rotas, usuários, manifestos, comprovantes) ficariam
+vazios, e os dados atuais (rotas, usuários e comprovantes) ficariam
 "presos" nos volumes antigos, parecendo que sumiram.
 
 Para evitar isso, o `docker-compose.yml` já foi ajustado para usar **nomes de
 volume fixos** (`admmendes_postgres_data`, `admmendes_redis_data`,
-`admmendes_minio_data`, `admmendes_caddy_data`, `admmendes_caddy_config`,
-`admmendes_ollama_data`), independentes do nome do projeto. Siga os passos
+`admmendes_minio_data`, `admmendes_caddy_data`, `admmendes_caddy_config`),
+independentes do nome do projeto. Siga os passos
 abaixo **na VPS** para migrar sem perder dados.
 
 ## 1. Descobrir os nomes atuais dos volumes
 
 ```bash
-docker volume ls | grep -E "postgres_data|redis_data|minio_data|caddy|ollama"
+docker volume ls | grep -E "postgres_data|redis_data|minio_data|caddy"
 ```
 
 Anote os nomes exatos (algo como `jm-rotas-brasil_postgres_data`,
@@ -51,8 +51,7 @@ git pull        # ou copie o docker-compose.yml/repositório atualizado
 
 ## 5. Migrar os dados dos volumes antigos para os novos nomes fixos
 
-Repita para cada volume (Postgres, Redis, MinIO, Caddy data, Caddy config;
-Ollama só se estiver usando o perfil `llm`):
+Repita para cada volume (Postgres, Redis, MinIO, Caddy data e Caddy config):
 
 ```bash
 docker volume create admmendes_postgres_data
@@ -77,8 +76,8 @@ Confirme no painel que o projeto agora aparece como `admmendes-rotas`.
 ## 7. Validar antes de limpar o que sobrou
 
 - Login funciona com o admin existente.
-- Rotas, usuários e manifestos anteriores aparecem normalmente.
-- Upload/consulta de manifesto (MinIO) funciona.
+- Rotas e usuários anteriores aparecem normalmente.
+- Upload/consulta de comprovantes (MinIO) funciona.
 
 ## 8. Só depois de validar: remover os containers/volumes antigos
 

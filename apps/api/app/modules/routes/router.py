@@ -23,7 +23,7 @@ from app.modules.routes.schemas import (
     AdminRouteCorrectionIn, AdminStopCorrectionIn, CheckinIn, DeliverIn, RouteIn, RouteKmIn, RouteOut,
     RouteTollIn, RouteUpdate, StopIn, StopUpdate,
 )
-from app.services.audit import log
+from app.services.audit import format_changes, log, log_update, snapshot
 from app.services.events import EventType, record_event
 from app.services import storage
 from app.services.routing import calculate_km
@@ -79,10 +79,14 @@ def _validate_route_resources(
         driver = db.get(Driver, driver_id)
         if driver is None or driver.branch_id != branch_id:
             raise HTTPException(status_code=422, detail="Motorista não pertence à filial da rota.")
+        if not driver.active or driver.blocked:
+            raise HTTPException(status_code=422, detail="Motorista inativo ou bloqueado não pode ser escalado.")
     if vehicle_id is not None:
         vehicle = db.get(Vehicle, vehicle_id)
         if vehicle is None or vehicle.branch_id != branch_id:
             raise HTTPException(status_code=422, detail="Veículo não pertence à filial da rota.")
+        if not vehicle.active or vehicle.blocked:
+            raise HTTPException(status_code=422, detail="Veículo inativo ou bloqueado não pode ser escalado.")
 
 
 def _safe_filename(filename: str | None) -> str:
@@ -328,9 +332,11 @@ def update_route(route_id: int, data: RouteUpdate,
         updates.get("driver_id", route.driver_id),
         updates.get("vehicle_id", route.vehicle_id),
     )
+    before = snapshot(route, list(updates))
     for field, value in updates.items():
         setattr(route, field, value)
-    log(db, user_id=user.id, action="update", entity="route", entity_id=route.id)
+    log_update(db, user_id=user.id, entity="route", entity_id=route.id,
+               before=before, obj=route, updates=updates)
     db.commit()
     return _load(db, route.id)
 
@@ -338,15 +344,19 @@ def update_route(route_id: int, data: RouteUpdate,
 @router.post("/{route_id}/stops", response_model=RouteOut, dependencies=[_EDITOR])
 def add_stop(route_id: int, data: StopIn,
              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Adiciona uma parada (destino) que não veio no manifesto."""
+    """Adiciona uma parada manual à rota."""
     route = _load(db, route_id)
     require_same_branch(user, route.branch_id)
     _guard_not_cancelled(route)
     payload = data.model_dump()
     if not payload.get("sequence"):
         payload["sequence"] = (max((s.sequence for s in route.stops), default=0) + 1)
-    db.add(RouteStop(route_id=route.id, **payload))
-    log(db, user_id=user.id, action="add_stop", entity="route", entity_id=route.id)
+    stop = RouteStop(route_id=route.id, **payload)
+    db.add(stop)
+    db.flush()
+    detail = format_changes({field: (None, value) for field, value in payload.items()})
+    log(db, user_id=user.id, action="create", entity="route_stop", entity_id=stop.id,
+        detail=f"route_id={route.id}; {detail}" if detail else f"route_id={route.id}")
     db.commit()
     return _load(db, route.id)
 
@@ -358,10 +368,12 @@ def update_stop(route_id: int, stop_id: int, data: StopUpdate,
     route, stop = _get_stop(db, route_id, stop_id)
     require_same_branch(user, route.branch_id)
     _guard_not_cancelled(route)
-    for field, value in data.model_dump(exclude_unset=True).items():
+    updates = data.model_dump(exclude_unset=True)
+    before = snapshot(stop, list(updates))
+    for field, value in updates.items():
         setattr(stop, field, value)
-    log(db, user_id=user.id, action="update_stop", entity="route", entity_id=route.id,
-        detail=f"stop_id={stop_id}")
+    log_update(db, user_id=user.id, entity="route_stop", entity_id=stop.id,
+               before=before, obj=stop, updates=updates)
     db.commit()
     return _load(db, route.id)
 
@@ -372,9 +384,13 @@ def delete_stop(route_id: int, stop_id: int,
     route, stop = _get_stop(db, route_id, stop_id)
     require_same_branch(user, route.branch_id)
     _guard_not_cancelled(route)
+    fields = ["sequence", "customer_name", "customer_address", "city", "planned_date", "planned_time",
+              "temperature", "stop_type", "weight_kg", "pallets", "order_number", "status"]
+    before = snapshot(stop, fields)
     db.delete(stop)
-    log(db, user_id=user.id, action="delete_stop", entity="route", entity_id=route.id,
-        detail=f"stop_id={stop_id}")
+    detail = format_changes({field: (value, None) for field, value in before.items()})
+    log(db, user_id=user.id, action="delete", entity="route_stop", entity_id=stop.id,
+        detail=f"route_id={route.id}; {detail}" if detail else f"route_id={route.id}")
     db.commit()
     return _load(db, route.id)
 
@@ -422,9 +438,13 @@ def optimize_sequence(route_id: int,
         ordered.append(nearest)
         current_address = _stop_address(nearest)
 
+    sequence_before = {stop.id: stop.sequence for stop in ordered}
     for position, stop in enumerate(ordered, start=1):
         stop.sequence = position
-    log(db, user_id=user.id, action="optimize_sequence", entity="route", entity_id=route.id)
+    changes = {f"stop_{stop.id}_sequence": (sequence_before[stop.id], stop.sequence)
+               for stop in ordered if sequence_before[stop.id] != stop.sequence}
+    log(db, user_id=user.id, action="optimize_sequence", entity="route", entity_id=route.id,
+        detail=format_changes(changes) or "A sequência já estava otimizada.")
     db.commit()
     return _load(db, route.id)
 
@@ -441,12 +461,17 @@ def _set_dock_time(db, route_id, user, field, event_type, status_after=None):
     if route.dock_session is None:
         db.add(dock)
     _guard_dock_sequence(dock, field)
+    dock_before = snapshot(dock, [field])
+    route_before = snapshot(route, ["status"])
     setattr(dock, field, datetime.now(timezone.utc))
     _recalc_dock(dock)
     if status_after:
         route.status = status_after
     record_event(db, route_id=route.id, event_type=event_type, user_id=user.id)
-    log(db, user_id=user.id, action=event_type.value, entity="route", entity_id=route.id)
+    log_update(db, user_id=user.id, entity="route_dock", entity_id=route.id,
+               before=dock_before, obj=dock, updates={field: getattr(dock, field)})
+    log_update(db, user_id=user.id, entity="route", entity_id=route.id,
+               before=route_before, obj=route, updates={"status": route.status})
     db.commit()
     return _load(db, route.id)
 
@@ -492,12 +517,17 @@ def depart_cd(route_id: int, db: Session = Depends(get_db), user: User = Depends
         db.add(dock)
     _guard_dock_sequence(dock, "departure_cd_at")
     now = datetime.now(timezone.utc)
+    route_before = snapshot(route, ["status", "actual_departure_at"])
+    dock_before = snapshot(dock, ["departure_cd_at"])
     dock.departure_cd_at = now
     route.actual_departure_at = now
     route.status = "em_rota"
     _recalc_dock(dock)
     record_event(db, route_id=route.id, event_type=EventType.DEPARTED_CD, user_id=user.id)
-    log(db, user_id=user.id, action="depart", entity="route", entity_id=route.id)
+    log_update(db, user_id=user.id, entity="route", entity_id=route.id, before=route_before,
+               obj=route, updates={"status": route.status, "actual_departure_at": route.actual_departure_at})
+    log_update(db, user_id=user.id, entity="route_dock", entity_id=route.id, before=dock_before,
+               obj=dock, updates={"departure_cd_at": dock.departure_cd_at})
     db.commit()
     return _load(db, route.id)
 
@@ -733,10 +763,12 @@ def close_route(route_id: int, db: Session = Depends(get_db), user: User = Depen
         raise HTTPException(status_code=409, detail="Registre a saída do CD antes de fechar a rota.")
     _guard_all_stops_closed(route)
     _guard_failed_stops_have_warehouse_proofs(route)
+    before = snapshot(route, ["status", "closed_at"])
     route.status = "finalizada"
     route.closed_at = datetime.now(timezone.utc)
     record_event(db, route_id=route.id, event_type=EventType.ROUTE_CLOSED, user_id=user.id)
-    log(db, user_id=user.id, action="close", entity="route", entity_id=route.id)
+    log_update(db, user_id=user.id, entity="route", entity_id=route.id, before=before,
+               obj=route, updates={"status": route.status, "closed_at": route.closed_at})
     db.commit()
     return _load(db, route.id)
 
@@ -749,10 +781,12 @@ def reopen_route(route_id: int, db: Session = Depends(get_db), user: User = Depe
     require_same_branch(user, route.branch_id)
     if route.status not in CLOSED_STATES:
         raise HTTPException(status_code=409, detail="Apenas rotas finalizadas/canceladas podem ser reabertas.")
+    before = snapshot(route, ["status", "closed_at"])
     route.status = "em_rota" if route.actual_departure_at else "planejada"
     route.closed_at = None
     record_event(db, route_id=route.id, event_type=EventType.ROUTE_REOPENED, user_id=user.id)
-    log(db, user_id=user.id, action="reopen", entity="route", entity_id=route.id)
+    log_update(db, user_id=user.id, entity="route", entity_id=route.id, before=before,
+               obj=route, updates={"status": route.status, "closed_at": route.closed_at})
     db.commit()
     return _load(db, route.id)
 
@@ -873,9 +907,11 @@ def add_toll(route_id: int, data: RouteTollIn,
     _guard_not_cancelled(route)
     if data.amount <= 0:
         raise HTTPException(status_code=422, detail="Valor do pedágio deve ser maior que zero.")
-    db.add(RouteToll(route_id=route.id, direction=data.direction, amount=data.amount, recorded_by=user.id))
-    log(db, user_id=user.id, action="add_toll", entity="route", entity_id=route.id,
-        detail=f"{data.direction}={data.amount}")
+    toll = RouteToll(route_id=route.id, direction=data.direction, amount=data.amount, recorded_by=user.id)
+    db.add(toll)
+    db.flush()
+    log(db, user_id=user.id, action="create", entity="route_toll", entity_id=toll.id,
+        detail=f"route_id={route.id}; " + (format_changes({"direction": (None, toll.direction), "amount": (None, toll.amount)}) or ""))
     db.commit()
     return _load(db, route.id)
 
@@ -888,9 +924,10 @@ def delete_toll(route_id: int, toll_id: int,
     toll = next((t for t in route.tolls if t.id == toll_id), None)
     if toll is None:
         raise HTTPException(status_code=404, detail="Lançamento de pedágio não encontrado.")
+    detail = format_changes({"direction": (toll.direction, None), "amount": (toll.amount, None)})
     db.delete(toll)
-    log(db, user_id=user.id, action="delete_toll", entity="route", entity_id=route.id,
-        detail=f"toll_id={toll_id}")
+    log(db, user_id=user.id, action="delete", entity="route_toll", entity_id=toll.id,
+        detail=f"route_id={route.id}; {detail}")
     db.commit()
     return _load(db, route.id)
 
@@ -904,11 +941,14 @@ def force_start_route(route_id: int, db: Session = Depends(get_db), user: User =
     require_same_branch(user, route.branch_id)
     _guard_editable(route)
     now = datetime.now(timezone.utc)
+    route_before = snapshot(route, ["status", "actual_departure_at"])
     dock = route.dock_session
     if dock is None:
         dock = DockSession(route_id=route.id)
         db.add(dock)
         route.dock_session = dock
+    dock_fields = ["arrival_cd_at", "dock_entry_at", "loading_started_at", "loading_finished_at", "operator_released_at", "departure_cd_at"]
+    dock_before = snapshot(dock, dock_fields)
     if not dock.arrival_cd_at:
         dock.arrival_cd_at = now
     if not dock.dock_entry_at:
@@ -925,7 +965,11 @@ def force_start_route(route_id: int, db: Session = Depends(get_db), user: User =
     route.status = "em_rota"
     _recalc_dock(dock)
     record_event(db, route_id=route.id, event_type=EventType.DEPARTED_CD, user_id=user.id)
-    log(db, user_id=user.id, action="force_start", entity="route", entity_id=route.id)
+    route_updates = {"status": route.status, "actual_departure_at": route.actual_departure_at}
+    log_update(db, user_id=user.id, entity="route", entity_id=route.id,
+               before=route_before, obj=route, updates=route_updates)
+    log_update(db, user_id=user.id, entity="route_dock", entity_id=route.id,
+               before=dock_before, obj=dock, updates={field: getattr(dock, field) for field in dock_fields})
     db.commit()
     return _load(db, route.id)
 
@@ -944,11 +988,12 @@ def update_km(route_id: int, data: RouteKmIn,
     _guard_driver_assignment(db, user, route)
     _guard_not_cancelled(route)
     updates = data.model_dump(exclude_unset=True)
+    before = snapshot(route, list(updates))
     for field, value in updates.items():
         if value is not None and value < 0:
             raise HTTPException(status_code=422, detail="KM informado deve ser maior ou igual a zero.")
         setattr(route, field, value)
-    log(db, user_id=user.id, action="update_km", entity="route", entity_id=route.id,
-        detail=", ".join(f"{k}={v}" for k, v in updates.items()))
+    log_update(db, user_id=user.id, entity="route", entity_id=route.id,
+               before=before, obj=route, updates=updates)
     db.commit()
     return _load(db, route.id)

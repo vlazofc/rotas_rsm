@@ -1,18 +1,20 @@
 """Inicialização: cria tabelas, filial Brasil, admin semente e motivos de falha."""
+from datetime import date
 from sqlalchemy import select, text
 
 from app.core.config import settings
 from app.core.permissions import ROLE_CONFIG
 from app.core.security import hash_password
-from app.db.models import Branch, DeliveryFailureReason, RoleProfile, Tenant, User, VehicleType
+from app.db.models import Branch, ChecklistTemplateItem, DeliveryFailureReason, Expense, FinancialAccount, FinancialCategory, Revenue, RoleProfile, Route, Tenant, User, VehicleType
+from app.services.accounting import post_expense, post_revenue
 from app.db.session import Base, SessionLocal, engine
 from app.core.logging import logger
 
 # Tabelas que ganharam a coluna tenant_id (multiempresa) após o create_all
 # inicial. Para bancos de dev já existentes, a coluna precisa ser adicionada
-# manualmente — ver docs/visao-evolucao.md (seção "Multiempresa SaaS").
+# manualmente para manter compatibilidade com bancos de desenvolvimento existentes.
 _TENANT_ID_TABLES = (
-    "branches", "users", "drivers", "vehicles", "routes", "manifests",
+    "branches", "users", "drivers", "vehicles", "routes",
     "audit_logs", "notifications",
 )
 
@@ -27,6 +29,31 @@ def _add_missing_columns() -> None:
                     "tenant_id INTEGER REFERENCES tenants(id)"
                 )
             )
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS subgroup VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions_json TEXT"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_type VARCHAR(2) DEFAULT 'PJ'"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS trade_name VARCHAR(160)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS state_registration VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS municipal_registration VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS identity_document VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS birth_date DATE"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS main_activity VARCHAR(160)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS contact_name VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS financial_contact VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS financial_phone VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS postal_code VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS address_number VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS complement VARCHAR(100)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS district VARCHAR(100)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS city VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS state VARCHAR(2)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(12,2)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS payment_term_days INTEGER"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS bank_reference VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS commercial_reference TEXT"))
+        conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS notes TEXT"))
         for column in ("km_outbound_informed", "km_return_informed"):
             conn.execute(text(f"ALTER TABLE routes ADD COLUMN IF NOT EXISTS {column} FLOAT"))
         conn.execute(
@@ -36,7 +63,27 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS vehicle_id INTEGER REFERENCES vehicles(id)"))
         conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS odometer_km FLOAT"))
         conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS odometer_attachment_id INTEGER REFERENCES attachments(id)"))
+        conn.execute(text("ALTER TABLE route_occurrences ADD COLUMN IF NOT EXISTS assigned_to_id INTEGER REFERENCES users(id)"))
+        conn.execute(text("ALTER TABLE route_occurrences ADD COLUMN IF NOT EXISTS treatment_started_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE route_occurrences ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE route_occurrences ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMPTZ"))
         conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS vehicle_type_id INTEGER REFERENCES vehicle_types(id)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS carrier_id INTEGER REFERENCES carriers(id)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS freight_receiver_type VARCHAR(20) DEFAULT 'proprietario'"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_carrier_vehicle_single ON carrier_vehicle_links(vehicle_id)"))
+        conn.execute(text("UPDATE vehicles v SET carrier_id = l.carrier_id, freight_receiver_type = 'terceiro' FROM carrier_vehicle_links l WHERE l.vehicle_id = v.id AND v.carrier_id IS NULL"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS person_type VARCHAR(20) DEFAULT 'pessoa_fisica'"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS phone VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS email VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS address VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS bank_name VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS bank_agency VARCHAR(30)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS bank_account VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS bank_account_type VARCHAR(30)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS pix_key_type VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS pix_key VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS antt_number VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS antt_expiry_date DATE"))
         # Campos Fieldeas
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'manual'"))
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS fieldeas_description VARCHAR(255)"))
@@ -74,6 +121,12 @@ def _add_missing_columns() -> None:
         conn.execute(
             text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS topbar_extends_sidebar BOOLEAN DEFAULT TRUE")
         )
+        conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS login_intro_text TEXT"))
+        conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS login_layout VARCHAR(30) DEFAULT 'centered'"))
+        conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS sidebar_background_color VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS sidebar_text_color VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS sidebar_active_color VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS navigation_layout VARCHAR(20) DEFAULT 'sidebar'"))
         # Campos importados da Torre de Controle (planilha) — routes
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS vehicle_requested VARCHAR(40)"))
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS vehicle_sent VARCHAR(40)"))
@@ -96,6 +149,49 @@ def _add_missing_columns() -> None:
         # Despesas importadas em lote (sem comprovante) — relaxa NOT NULL e adiciona source.
         conn.execute(text("ALTER TABLE expenses ALTER COLUMN attachment_id DROP NOT NULL"))
         conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'manual'"))
+        conn.execute(text("UPDATE expenses e SET source = 'driver' FROM users u WHERE e.user_id = u.id AND u.role = 'motorista' AND e.source = 'manual'"))
+        conn.execute(text("UPDATE expenses SET source = 'administrative' WHERE source = 'manual'"))
+        conn.execute(text("ALTER TABLE expenses ALTER COLUMN driver_id DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS maintenance_order_id INTEGER REFERENCES maintenance_orders(id)"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS approval_status VARCHAR(30) DEFAULT 'approved'"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS reviewed_by_id INTEGER REFERENCES users(id)"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS decision_note TEXT"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS due_date DATE"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS recurrence VARCHAR(20) DEFAULT 'none'"))
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS recurrence_count INTEGER DEFAULT 1"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_expenses_approval_status ON expenses (approval_status)"))
+        # Lançamentos anteriores à implantação já compunham o financeiro; novos aguardam aceite.
+        conn.execute(text("UPDATE expenses SET approval_status = 'approved' WHERE approval_status IS NULL"))
+        conn.execute(text("ALTER TABLE expenses ALTER COLUMN approval_status SET DEFAULT 'pending'"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS expense_id INTEGER REFERENCES expenses(id)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_financial_accounts_expense_id_unique ON financial_accounts (expense_id) WHERE expense_id IS NOT NULL"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS revenue_id INTEGER REFERENCES revenues(id)"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS driver_id INTEGER REFERENCES drivers(id)"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS route_id INTEGER REFERENCES routes(id)"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS discount_reason VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS payment_period_start DATE"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS payment_period_end DATE"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_financial_accounts_driver_id ON financial_accounts (driver_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_financial_accounts_route_id ON financial_accounts (route_id)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_financial_accounts_driver_period_unique ON financial_accounts (driver_id, payment_period_start, payment_period_end) WHERE driver_id IS NOT NULL"))
+        conn.execute(text("ALTER TABLE driver_statement_adjustments ADD COLUMN IF NOT EXISTS financial_account_id INTEGER REFERENCES financial_accounts(id)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_driver_adjustment_financial_account_unique ON driver_statement_adjustments (financial_account_id) WHERE financial_account_id IS NOT NULL"))
+        conn.execute(text("ALTER TABLE workflow_tasks ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 3"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_financial_accounts_revenue_id_unique ON financial_accounts (revenue_id) WHERE revenue_id IS NOT NULL"))
+        conn.execute(text("ALTER TABLE revenues ADD COLUMN IF NOT EXISTS billed_customer_name VARCHAR(180)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_revenues_billed_customer_name ON revenues (billed_customer_name)"))
+        conn.execute(text("INSERT INTO revenue_route_links (revenue_id, route_id) SELECT id, route_id FROM revenues WHERE route_id IS NOT NULL ON CONFLICT (revenue_id, route_id) DO NOTHING"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS recurrence_group VARCHAR(60)"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS recurrence_sequence INTEGER"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS recurrence_total INTEGER"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS service_invoice_number VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE financial_accounts ADD COLUMN IF NOT EXISTS service_invoice_attachment_id INTEGER REFERENCES attachments(id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_financial_accounts_service_invoice_number ON financial_accounts (service_invoice_number)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_financial_accounts_recurrence_group ON financial_accounts (recurrence_group)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_financial_accounts_recurrence_sequence_unique ON financial_accounts (recurrence_group, recurrence_sequence) WHERE recurrence_group IS NOT NULL"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_expenses_maintenance_order_id_unique ON expenses (maintenance_order_id) WHERE maintenance_order_id IS NOT NULL"))
         # Branding por cliente (multi-tenant) — tenant_id NULL = padrão da plataforma.
         conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id)"))
         conn.execute(
@@ -105,7 +201,6 @@ def _add_missing_columns() -> None:
             )
         )
         # Serviços ativáveis por cliente.
-        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS feature_ocr BOOLEAN DEFAULT TRUE"))
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS feature_sharepoint_sync BOOLEAN DEFAULT FALSE"))
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS feature_financeiro BOOLEAN DEFAULT TRUE"))
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS feature_rastreamento BOOLEAN DEFAULT TRUE"))
@@ -113,6 +208,90 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS feature_km_calculation BOOLEAN DEFAULT TRUE"))
         # Transportadoras (fornecedores) por cliente.
         conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS carrier_id INTEGER REFERENCES carriers(id)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS employment_type VARCHAR(20) DEFAULT 'proprio'"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS daily_rate NUMERIC(10,2)"))
+        conn.execute(text("ALTER TABLE driver_settings ADD COLUMN IF NOT EXISTS statement_release_day INTEGER DEFAULT 1"))
+        conn.execute(text("UPDATE drivers SET employment_type = 'agregado' WHERE carrier_id IS NOT NULL AND (employment_type IS NULL OR employment_type = 'proprio')"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS email VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS address VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS city VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS state VARCHAR(2)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS postal_code VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS birth_date DATE"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS cnh_number VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS cnh_category VARCHAR(10)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS cnh_expiry_date DATE"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS antt_number VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS antt_expiry_date DATE"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS registration_updated_at DATE"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS document_attachment_id INTEGER REFERENCES attachments(id)"))
+        conn.execute(text("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS cnh_attachment_id INTEGER REFERENCES attachments(id)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES vehicle_owners(id)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS ownership_type VARCHAR(20) DEFAULT 'proprio'"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS antt_number VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS antt_expiry_date DATE"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS person_type VARCHAR(20) DEFAULT 'pessoa_fisica'"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS bank_name VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS bank_agency VARCHAR(30)"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS bank_account VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS bank_account_type VARCHAR(30)"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS pix_key_type VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS pix_key VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS is_tenant_company BOOLEAN DEFAULT FALSE"))
+        for table in ("users", "drivers", "vehicles", "vehicle_owners"):
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS blocked BOOLEAN DEFAULT FALSE"))
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS status_reason TEXT"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS legal_name VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS document VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS state_registration VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS address VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS city VARCHAR(120)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS state VARCHAR(2)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS postal_code VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS phone VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS email VARCHAR(180)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS antt_number VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS antt_expiry_date DATE"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS partners TEXT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS renavam VARCHAR(30)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS chassis VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS registry_state VARCHAR(2)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS brand VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS model VARCHAR(100)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS manufacture_year INTEGER"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS model_year INTEGER"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS color VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS fuel VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS crlv_expiry_date DATE"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS axles INTEGER"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS rear_dual_wheels BOOLEAN DEFAULT TRUE"))
+        conn.execute(text("ALTER TABLE tire_inspections ADD COLUMN IF NOT EXISTS checklist_id INTEGER REFERENCES vehicle_checklists(id) ON DELETE CASCADE"))
+        conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS alert_due_days INTEGER DEFAULT 3"))
+        conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS alert_document_days INTEGER DEFAULT 30"))
+        conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS tire_warning_mm FLOAT DEFAULT 3"))
+        conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS tire_critical_mm FLOAT DEFAULT 1.6"))
+        conn.execute(text("UPDATE operational_settings SET alert_due_days=COALESCE(alert_due_days,3), alert_document_days=COALESCE(alert_document_days,30), tire_warning_mm=COALESCE(tire_warning_mm,3), tire_critical_mm=COALESCE(tire_critical_mm,1.6)"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS length_m FLOAT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS width_m FLOAT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS height_m FLOAT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS gross_weight_kg FLOAT"))
+        conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS crlv_attachment_id INTEGER REFERENCES attachments(id)"))
+        conn.execute(text("ALTER TABLE service_providers ADD COLUMN IF NOT EXISTS supplier_id INTEGER REFERENCES suppliers(id)"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS supplier_id INTEGER REFERENCES suppliers(id)"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS category VARCHAR(80) DEFAULT 'outros'"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS document VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS due_date DATE"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS cost_center VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS attachment_id INTEGER REFERENCES attachments(id)"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS financial_account_id INTEGER REFERENCES financial_accounts(id)"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS purchased_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS delivery_due_date DATE"))
+        conn.execute(text("ALTER TABLE purchase_tickets ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE maintenance_orders ADD COLUMN IF NOT EXISTS expected_completion_date DATE"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_purchase_financial_account_unique ON purchase_tickets (financial_account_id) WHERE financial_account_id IS NOT NULL"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS kind VARCHAR(20) DEFAULT 'arrendatario'"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS driver_payment_amount NUMERIC(12,2)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS driver_payment_notes TEXT"))
         # Conta SaaS — plano, mensalidade e vencimento por cliente.
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_plan VARCHAR(60)"))
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_amount NUMERIC(10,2)"))
@@ -154,6 +333,27 @@ DEFAULT_VEHICLE_TYPES = [
 ]
 
 
+# Itens de checklist de veículo mais comuns (criados no primeiro boot).
+# (code, label, label_pt_br, category, required, sort_order)
+DEFAULT_CHECKLIST_ITEMS = [
+    ("freios", "Travões", "Freios", "freios", True, 10),
+    ("pneus_estado", "Estado dos pneus", "Estado dos pneus", "pneus", True, 20),
+    ("pneus_calibragem", "Calibragem dos pneus", "Calibragem dos pneus", "pneus", False, 30),
+    ("estepe", "Roda sobresselente / estepe", "Estepe", "pneus", False, 40),
+    ("luzes", "Luzes e sinalização", "Luzes e sinalização", "eletrica", True, 50),
+    ("bateria", "Bateria", "Bateria", "eletrica", False, 60),
+    ("nivel_oleo", "Nível de óleo", "Nível de óleo", "fluidos", True, 70),
+    ("nivel_agua", "Nível de água/arrefecimento", "Nível de água/arrefecimento", "fluidos", False, 80),
+    ("vazamentos", "Vazamentos visíveis", "Vazamentos visíveis", "fluidos", True, 90),
+    ("documentacao", "Documentação do veículo em dia", "Documentação do veículo em dia", "documentacao", True, 100),
+    ("cnh_motorista", "CNH do motorista válida", "CNH do motorista válida", "documentacao", True, 110),
+    ("cinto_seguranca", "Cinto de segurança", "Cinto de segurança", "seguranca", True, 120),
+    ("extintor", "Extintor de incêndio", "Extintor de incêndio", "seguranca", True, 130),
+    ("triangulo_macaco", "Triângulo e macaco", "Triângulo e macaco", "seguranca", False, 140),
+    ("epi", "EPI do motorista/ajudante", "EPI do motorista/ajudante", "seguranca", False, 150),
+    ("limpeza_cabine", "Limpeza da cabine/baú", "Limpeza da cabine/baú", "outros", False, 160),
+]
+
 _INIT_DB_LOCK_KEY = 727384910  # chave arbitrária para o advisory lock abaixo.
 
 
@@ -193,6 +393,30 @@ def _init_db_locked() -> None:
                     profile.label = config["label"]
                 profile.system = True
 
+        # Garante que receitas históricas/importadas também apareçam em Contas a Receber.
+        linked_revenue_ids = select(FinancialAccount.revenue_id).where(FinancialAccount.revenue_id.is_not(None))
+        for revenue in db.scalars(select(Revenue).where(~Revenue.id.in_(linked_revenue_ids))).all():
+            route = db.get(Route, revenue.route_id) if revenue.route_id else None
+            db.add(FinancialAccount(
+                branch_id=revenue.branch_id, kind="receivable",
+                description=f"Receita da rota {route.codigo_ut if route else revenue.route_id or revenue.id}",
+                counterparty="Cliente da rota" if route else "Receita financeira",
+                category="frete" if route else "outros",
+                document=f"ROTA-{route.codigo_ut}" if route else f"RECEITA-{revenue.id}",
+                issue_date=revenue.revenue_date,
+                due_date=max(revenue.revenue_date, date.today()),
+                amount=revenue.amount, status="pendente", notes=revenue.notes,
+                created_by=revenue.user_id, revenue_id=revenue.id,
+            ))
+
+        # Converte o histórico financeiro em partidas dobradas, de forma idempotente.
+        for revenue in db.scalars(select(Revenue)).all():
+            try: post_revenue(db, revenue, revenue.user_id)
+            except Exception as exc: logger.warning("Receita %s não retrocontabilizada: %s", revenue.id, exc)
+        for expense in db.scalars(select(Expense).where(Expense.approval_status == "approved")).all():
+            try: post_expense(db, expense, expense.reviewed_by_id or expense.user_id)
+            except Exception as exc: logger.warning("Despesa %s não retrocontabilizada: %s", expense.id, exc)
+
         for code, label, label_pt_br, order in DEFAULT_FAILURE_REASONS:
             reason = db.scalar(select(DeliveryFailureReason).where(DeliveryFailureReason.code == code))
             if reason is None:
@@ -206,6 +430,14 @@ def _init_db_locked() -> None:
                 db.add(VehicleType(code=code, label=label, label_pt_br=label_pt_br, sort_order=order))
             elif vtype.label_pt_br is None:
                 vtype.label_pt_br = label_pt_br
+
+        for code, label, label_pt_br, category, required, order in DEFAULT_CHECKLIST_ITEMS:
+            citem = db.scalar(select(ChecklistTemplateItem).where(ChecklistTemplateItem.code == code))
+            if citem is None:
+                db.add(ChecklistTemplateItem(
+                    code=code, label=label, label_pt_br=label_pt_br,
+                    category=category, required=required, sort_order=order,
+                ))
 
         # Migra em vez de duplicar: bancos antigos podem ter o tenant/filial de
         # Portugal (scaffold inicial) ou o nome/slug antigo "JM Brasil"
@@ -244,6 +476,53 @@ def _init_db_locked() -> None:
             if branch.tenant_id is None:
                 branch.tenant_id = tenant.id
 
+        default_financial_categories = {
+            "payable": (
+                ("combustivel", "Combustível"), ("manutencao", "Manutenção"),
+                ("pedagio", "Pedágio"), ("limpeza", "Limpeza"),
+                ("diaria_motorista", "Diária de motorista"), ("diaria_ajudante", "Diária de ajudante"),
+                ("frete_transportadora", "Frete de transportadora"), ("diarias_pessoal", "Diárias e pessoal"),
+                ("impostos_taxas", "Impostos e taxas"), ("seguros", "Seguros"),
+                ("compras_estoque", "Compras e estoque"), ("servicos", "Serviços"),
+                ("outros", "Outras despesas"),
+            ),
+            "receivable": (
+                ("frete", "Fretes"), ("servicos", "Serviços"),
+                ("reembolso", "Reembolsos"), ("desconto_motorista", "Desconto de motorista"), ("outras_receitas", "Outras receitas"),
+                ("outros", "Outras receitas"),
+            ),
+        }
+        for kind, categories in default_financial_categories.items():
+            for code, name in categories:
+                existing = db.scalar(select(FinancialCategory).where(
+                    FinancialCategory.tenant_id == tenant.id,
+                    FinancialCategory.kind == kind,
+                    FinancialCategory.code == code,
+                ))
+                if existing is None:
+                    db.add(FinancialCategory(tenant_id=tenant.id, kind=kind, code=code, name=name, active=True, system=True))
+
+        db.flush()
+        # Preserva categorias livres usadas antes deste cadastro estruturado.
+        legacy_categories = db.execute(
+            select(FinancialAccount.kind, FinancialAccount.category)
+            .join(Branch, Branch.id == FinancialAccount.branch_id)
+            .where(Branch.tenant_id == tenant.id)
+            .distinct()
+        ).all()
+        for kind, code in legacy_categories:
+            if not code or kind not in {"payable", "receivable"}: continue
+            existing = db.scalar(select(FinancialCategory).where(
+                FinancialCategory.tenant_id == tenant.id,
+                FinancialCategory.kind == kind,
+                FinancialCategory.code == code,
+            ))
+            if existing is None:
+                db.add(FinancialCategory(
+                    tenant_id=tenant.id, kind=kind, code=code,
+                    name=code.replace("_", " ").strip().title(), active=True, system=False,
+                ))
+
         if settings.auth_mode == "local":
             admin = db.scalar(select(User).where(User.email == settings.seed_admin_email))
             if admin is None:
@@ -269,7 +548,7 @@ def _init_db_locked() -> None:
             ),
             {"tid": tenant.id},
         )
-        for table in ("users", "drivers", "vehicles", "routes", "manifests", "expenses", "revenues"):
+        for table in ("users", "drivers", "vehicles", "routes", "expenses", "revenues"):
             db.execute(
                 text(
                     f"UPDATE {table} t SET tenant_id = b.tenant_id "

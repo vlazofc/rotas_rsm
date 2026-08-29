@@ -6,6 +6,7 @@ cloudflare.txt
 # Backups e dados
 /backups/
 /test-artifacts/
+/.tmp_audit/
 *.dump
 *.sql.gz
 

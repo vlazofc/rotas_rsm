@@ -4,7 +4,12 @@ import api from "../services/api";
 export interface Branding {
   app_name: string | null;
   app_subtitle: string | null;
+  login_intro_text: string | null;
+  login_layout: "centered" | "institutional" | "side_form";
   primary_color: string | null;
+  sidebar_background_color: string | null;
+  sidebar_text_color: string | null;
+  sidebar_active_color: string | null;
   enabled_locales: string[] | null;
   topbar_extends_sidebar: boolean;
   logo_url: string | null;
@@ -16,7 +21,12 @@ export interface Branding {
 const DEFAULTS: Branding = {
   app_name: null,
   app_subtitle: null,
+  login_intro_text: null,
+  login_layout: "centered",
   primary_color: null,
+  sidebar_background_color: null,
+  sidebar_text_color: null,
+  sidebar_active_color: null,
   enabled_locales: null,
   topbar_extends_sidebar: true,
   logo_url: null,

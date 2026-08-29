@@ -41,6 +41,7 @@ interface AuditReport {
   ip?: string | null;
   created_at: string;
 }
+interface ReportOverview {operation:{routes:number;completed:number;in_transit:number;cancelled:number;completion_rate:number;km_total:number;tolls:number;by_status:{label:string;value:number}[]};finance:{revenue:number;expense:number;result:number;margin:number;payable:number;receivable:number;expenses_by_category:{label:string;value:number}[];expenses_by_vehicle:{label:string;value:number}[]};control:{occurrences_open:number;tasks_open:number;tasks_in_progress:number;tasks_returned:number};fleet:{maintenance_open:number;maintenance_overdue:number;tires_total:number;tires_attention:number;parts_low:number;stock_value:number}}
 
 const REASON_VALUES = ["combustivel", "manutencao", "limpeza", "outros"];
 
@@ -57,7 +58,8 @@ export default function Reports() {
   const initial = currentMonthRange();
   const [start, setStart] = useState(initial.start);
   const [end, setEnd] = useState(initial.end);
-  const [activeTab, setActiveTab] = useState<"operation" | "expenses" | "audit">("operation");
+  const [activeTab, setActiveTab] = useState<"overview" | "operation" | "expenses" | "audit">("overview");
+  const [overview,setOverview]=useState<ReportOverview|null>(null);
   const [proofs, setProofs] = useState<ProofReport[]>([]);
   const [expenses, setExpenses] = useState<ExpenseReport[]>([]);
   const [auditRows, setAuditRows] = useState<AuditReport[]>([]);
@@ -73,6 +75,10 @@ export default function Reports() {
     setError("");
     setLoading(true);
     setUpdatedAt(null);
+    if(tab==="overview"){
+      try{const response=await api.get<ReportOverview>("/reports/overview",{params:params()});setOverview(response.data);setUpdatedAt(new Date().toLocaleTimeString(i18n.language))}catch(err:any){setError(formatApiError(err?.response?.data?.detail)??"Não foi possível carregar o resumo gerencial.")}finally{setLoading(false)}
+      return;
+    }
     if (tab === "operation") {
       try {
         const response = await api.get<ProofReport[]>("/reports/proofs", { params: params() });
@@ -194,6 +200,7 @@ export default function Reports() {
       {updatedAt && !error && <p className="report-updated">{t("rep.updated_at", { time: updatedAt })}</p>}
 
       <div className="report-tabs" role="tablist" aria-label={t("rep.tabs_aria")}>
+        <button type="button" className={activeTab === "overview" ? "active" : ""} onClick={() => setActiveTab("overview")}><IconDashboard/><span>Visão geral</span></button>
         <button type="button" className={activeTab === "operation" ? "active" : ""} onClick={() => setActiveTab("operation")}>
           <IconRoutes /> <span>{t("rep.tab_operation")}</span>
         </button>
@@ -205,7 +212,7 @@ export default function Reports() {
         </button>
       </div>
 
-      {activeTab === "expenses" ? (
+      {activeTab === "overview" && overview ? <Overview data={overview} locale={i18n.language}/> : activeTab === "expenses" ? (
         <section className="card-panel" style={{ marginBottom: 16 }}>
           <div className="section-head">
             <div>
@@ -323,9 +330,33 @@ export default function Reports() {
   );
 }
 
+function Overview({data,locale}:{data:ReportOverview;locale:string}){
+ const currency=(value:number)=>formatCurrency(value,locale);
+ return <div className="report-overview">
+  <section className="report-kpis">
+   <article><span>Rotas no período</span><strong>{data.operation.routes}</strong><small>{data.operation.completion_rate}% concluídas</small></article>
+   <article><span>Receitas</span><strong>{currency(data.finance.revenue)}</strong><small>A receber: {currency(data.finance.receivable)}</small></article>
+   <article><span>Despesas</span><strong>{currency(data.finance.expense)}</strong><small>A pagar: {currency(data.finance.payable)}</small></article>
+   <article className={data.finance.result<0?"negative":"positive"}><span>Resultado</span><strong>{currency(data.finance.result)}</strong><small>Margem de {data.finance.margin}%</small></article>
+  </section>
+  <div className="report-grid-2">
+   <ReportPanel title="Situação das rotas" subtitle={`${data.operation.km_total.toLocaleString("pt-BR")} km · ${currency(data.operation.tolls)} em pedágios`}><Bars rows={data.operation.by_status}/></ReportPanel>
+   <ReportPanel title="Despesas por categoria" subtitle="Participação no total aprovado"><Bars rows={data.finance.expenses_by_category} money/></ReportPanel>
+   <ReportPanel title="Custos por veículo" subtitle="Placas com maior impacto financeiro"><Bars rows={data.finance.expenses_by_vehicle} money/></ReportPanel>
+   <ReportPanel title="Tarefas e ocorrências" subtitle="Pendências que exigem acompanhamento"><div className="report-mini-kpis"><div><strong>{data.control.tasks_open}</strong><span>Tarefas abertas</span></div><div><strong>{data.control.tasks_in_progress}</strong><span>Em tratamento</span></div><div><strong>{data.control.tasks_returned}</strong><span>Devolvidas</span></div><div><strong>{data.control.occurrences_open}</strong><span>Ocorrências abertas</span></div></div></ReportPanel>
+  </div>
+  <section className="report-fleet-strip"><div><span>Manutenções abertas</span><strong>{data.fleet.maintenance_open}</strong></div><div className={data.fleet.maintenance_overdue?"warn":""}><span>Manutenções vencidas</span><strong>{data.fleet.maintenance_overdue}</strong></div><div><span>Pneus monitorados</span><strong>{data.fleet.tires_total}</strong></div><div className={data.fleet.tires_attention?"warn":""}><span>Pneus em atenção</span><strong>{data.fleet.tires_attention}</strong></div><div className={data.fleet.parts_low?"warn":""}><span>Itens abaixo do mínimo</span><strong>{data.fleet.parts_low}</strong></div><div><span>Valor do estoque</span><strong>{currency(data.fleet.stock_value)}</strong></div></section>
+ </div>
+}
+function ReportPanel({title,subtitle,children}:{title:string;subtitle:string;children:React.ReactNode}){return <section className="card-panel report-panel"><div className="section-head"><div><h3>{title}</h3><p>{subtitle}</p></div></div>{children}</section>}
+function Bars({rows,money=false}:{rows:{label:string;value:number}[];money?:boolean}){const max=Math.max(...rows.map(row=>row.value),1);return <div className="report-bars">{rows.slice(0,7).map(row=><div key={row.label}><span>{humanize(row.label)}</span><div><i style={{width:`${Math.max(3,row.value/max*100)}%`}}></i></div><strong>{money?formatCurrency(row.value,"pt-BR"):row.value.toLocaleString("pt-BR")}</strong></div>)}{rows.length===0&&<p className="empty-state">Sem dados no período.</p>}</div>}
+function humanize(value:string){return value.replaceAll("_"," ").replace(/(^|\s)\S/g,char=>char.toUpperCase())}
+
 function formatCurrency(value: number, locale = "pt-BR") {
   return new Intl.NumberFormat(locale, { style: "currency", currency: locale === "pt-BR" ? "BRL" : "EUR" }).format(value);
 }
+
+function IconDashboard(){return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>}
 
 function formatDateTime(value: string, locale = "pt-BR") {
   const date = new Date(value);

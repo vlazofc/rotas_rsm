@@ -18,6 +18,16 @@ function getToken(): string | null {
   return isPreviewMode() ? sessionStorage.getItem("access_token") : localStorage.getItem("access_token");
 }
 
+function getRefreshToken(): string | null {
+  return isPreviewMode() ? sessionStorage.getItem("refresh_token") : localStorage.getItem("refresh_token");
+}
+
+function storeTokens(accessToken: string, refreshToken: string) {
+  const storage = isPreviewMode() ? sessionStorage : localStorage;
+  storage.setItem("access_token", accessToken);
+  storage.setItem("refresh_token", refreshToken);
+}
+
 export function startPreviewSession(accessToken: string, refreshToken: string) {
   sessionStorage.setItem("preview_mode", "1");
   sessionStorage.setItem("access_token", accessToken);
@@ -37,9 +47,34 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+let refreshPromise: Promise<string> | null = null;
+
 api.interceptors.response.use(
   (r) => r,
-  (error) => {
+  async (error) => {
+    const original = error.config as (typeof error.config & { _retried?: boolean }) | undefined;
+    const canRefresh = error.response?.status === 401
+      && original
+      && !original._retried
+      && !String(original.url || "").includes("/auth/login")
+      && !String(original.url || "").includes("/auth/refresh")
+      && Boolean(getRefreshToken());
+    if (canRefresh) {
+      original._retried = true;
+      refreshPromise ??= api.post("/auth/refresh", { refresh_token: getRefreshToken() })
+        .then(({ data }) => {
+          storeTokens(data.access_token, data.refresh_token);
+          return data.access_token as string;
+        })
+        .finally(() => { refreshPromise = null; });
+      try {
+        const accessToken = await refreshPromise;
+        original.headers.Authorization = `Bearer ${accessToken}`;
+        return api(original);
+      } catch {
+        // A limpeza abaixo encerra a sessão quando o refresh expirou ou foi invalidado.
+      }
+    }
     if (error.response?.status === 401) {
       if (isPreviewMode()) {
         sessionStorage.removeItem("preview_mode");
@@ -63,8 +98,7 @@ export async function login(email: string, password: string) {
   const { data } = await api.post("/auth/login", form, {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
   });
-  localStorage.setItem("access_token", data.access_token);
-  localStorage.setItem("refresh_token", data.refresh_token);
+  storeTokens(data.access_token, data.refresh_token);
   return data;
 }
 

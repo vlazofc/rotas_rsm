@@ -14,11 +14,11 @@ from sqlalchemy.orm import Session
 
 from app.core.permissions import Role, require_roles
 from app.core.security import create_access_token, create_refresh_token
-from app.db.models import Branch, Tenant, User
+from app.db.models import Branch, Tenant, User, Vehicle, VehicleOwner
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.modules.auth.schemas import TokenResponse
-from app.services.audit import log
+from app.services.audit import log, log_update, snapshot
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -40,7 +40,6 @@ class TenantUpdate(BaseModel):
     name: str | None = None
     country: str | None = None
     active: bool | None = None
-    feature_ocr: bool | None = None
     feature_sharepoint_sync: bool | None = None
     feature_financeiro: bool | None = None
     feature_rastreamento: bool | None = None
@@ -57,7 +56,6 @@ class TenantOut(BaseModel):
     slug: str
     country: str
     active: bool
-    feature_ocr: bool
     feature_sharepoint_sync: bool
     feature_financeiro: bool
     feature_rastreamento: bool
@@ -69,9 +67,28 @@ class TenantOut(BaseModel):
     billing_last_payment_date: date | None = None
     billing_status: str | None = None  # em_dia | a_vencer | atrasado | sem_plano (computado)
     billing_next_due_date: date | None = None  # computado
+    legal_name: str | None = None; document: str | None = None; state_registration: str | None = None
+    address: str | None = None; city: str | None = None; state: str | None = None; postal_code: str | None = None
+    phone: str | None = None; email: str | None = None; antt_number: str | None = None
+    antt_expiry_date: date | None = None; partners: str | None = None
 
     class Config:
         from_attributes = True
+
+
+class TenantCompanyUpdate(BaseModel):
+    legal_name: str = Field(min_length=2, max_length=180)
+    document: str = Field(min_length=11, max_length=40)
+    state_registration: str | None = None
+    address: str = Field(min_length=3, max_length=255)
+    city: str = Field(min_length=2, max_length=120)
+    state: str = Field(min_length=2, max_length=2)
+    postal_code: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    antt_number: str = Field(min_length=3, max_length=40)
+    antt_expiry_date: date | None = None
+    partners: str | None = None
 
 
 def _next_due_date(due_day: int, today: date) -> date:
@@ -117,6 +134,51 @@ def my_tenant(db: Session = Depends(get_db), user: User = Depends(get_current_us
     tenant = db.get(Tenant, user.tenant_id)
     if tenant is None or not tenant.active:
         raise HTTPException(status_code=404, detail="Empresa não encontrada.")
+    return _serialize_tenant(tenant)
+
+
+@router.put("/me/company", response_model=TenantOut,
+            dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
+def update_my_company(data: TenantCompanyUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    tenant = db.get(Tenant, user.tenant_id) if user.tenant_id else None
+    if tenant is None or not tenant.active:
+        raise HTTPException(status_code=404, detail="Empresa não encontrada.")
+    updates = data.model_dump()
+    document = "".join(char for char in updates["document"] if char.isdigit())
+    if len(document) != 14:
+        raise HTTPException(status_code=422, detail="Informe um CNPJ válido com 14 dígitos.")
+    updates["document"] = document
+    updates["state"] = updates["state"].upper()
+    before = snapshot(tenant, list(updates))
+    for field, value in updates.items():
+        setattr(tenant, field, value)
+    log_update(db, user_id=user.id, entity="tenant_company", entity_id=tenant.id,
+               before=before, obj=tenant, updates=updates)
+    company_owner = db.scalar(select(VehicleOwner).where(
+        VehicleOwner.tenant_id == tenant.id, VehicleOwner.is_tenant_company.is_(True)
+    ))
+    owner_values = {"name": tenant.legal_name, "document": tenant.document, "person_type": "pessoa_juridica",
+                    "phone": tenant.phone, "email": tenant.email,
+                    "address": ", ".join(filter(None, [tenant.address, tenant.city, tenant.state])),
+                    "active": True, "is_tenant_company": True}
+    if company_owner is None:
+        company_owner = VehicleOwner(tenant_id=tenant.id, **owner_values); db.add(company_owner); db.flush()
+        log(db, user_id=user.id, action="create", entity="vehicle_owner", entity_id=company_owner.id,
+            detail="Proprietário institucional criado a partir dos dados da empresa.")
+    else:
+        owner_before = snapshot(company_owner, list(owner_values))
+        for field, value in owner_values.items(): setattr(company_owner, field, value)
+        log_update(db, user_id=user.id, entity="vehicle_owner", entity_id=company_owner.id,
+                   before=owner_before, obj=company_owner, updates=owner_values)
+    own_vehicles = db.scalars(select(Vehicle).where(Vehicle.tenant_id == tenant.id, Vehicle.ownership_type == "proprio")).all()
+    for vehicle in own_vehicles:
+        vehicle_updates = {"owner_id": company_owner.id, "antt_number": tenant.antt_number,
+                           "antt_expiry_date": tenant.antt_expiry_date}
+        vehicle_before = snapshot(vehicle, list(vehicle_updates))
+        for field, value in vehicle_updates.items(): setattr(vehicle, field, value)
+        log_update(db, user_id=user.id, entity="vehicle", entity_id=vehicle.id,
+                   before=vehicle_before, obj=vehicle, updates=vehicle_updates)
+    db.commit(); db.refresh(tenant)
     return _serialize_tenant(tenant)
 
 
@@ -195,8 +257,8 @@ def create_preview_session(tenant_id: int, db: Session = Depends(get_db)):
         preview_user.branch_id = branch.id
 
     db.commit()
-    claims = {"role": preview_user.role, "branch_id": preview_user.branch_id, "name": preview_user.name}
+    claims = {"role": preview_user.role, "branch_id": preview_user.branch_id, "name": preview_user.name, "auth_version": preview_user.auth_version}
     return TokenResponse(
         access_token=create_access_token(str(preview_user.id), **claims),
-        refresh_token=create_refresh_token(str(preview_user.id)),
+        refresh_token=create_refresh_token(str(preview_user.id), auth_version=preview_user.auth_version),
     )

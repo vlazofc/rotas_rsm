@@ -13,15 +13,13 @@ Caddy (proxy interno)
    └── /api     → api (FastAPI)      ← decide O QUE cada um faz (RBAC + auditoria)
                      ├── PostgreSQL + PostGIS   (privado)
                      ├── Redis                  (privado)  → fila Celery
-                     ├── MinIO                  (privado)  → manifestos/comprovantes
+                     ├── MinIO                  (privado)  → comprovantes/anexos
                      ├── worker (Celery)        → notificações, cálculos
-                     ├── ocr-worker (Celery, fila "ocr")  → PaddleOCR/Tesseract
                      └── scheduler (Celery beat)
 ```
 
 ## Princípios
 - **API-first:** o mobile futuro consome a mesma API `/api`.
-- **OCR isolado:** `apps/ocr-worker` é trocável (Paddle → Azure DI / Gemini / OpenAI Vision) sem mexer no resto.
 - **Segurança em duas camadas:** Cloudflare Access (entrada) + RBAC no backend (regra de negócio).
-- **Nada exposto:** Postgres/Redis/MinIO/API só na rede `internal` do Docker.
+- **Nada exposto publicamente:** portas administrativas escutam somente em `127.0.0.1`; serviços comunicam pela rede `internal`.
 - **Segredos só no `.env`** do servidor; nunca no Git.

@@ -1,4 +1,4 @@
-"""Cliente MinIO/S3 para anexos (manifestos, comprovantes)."""
+"""Cliente MinIO/S3 para comprovantes e anexos."""
 import io
 from typing import BinaryIO
 
@@ -29,7 +29,7 @@ def _client(endpoint: str, secure: bool) -> Minio:
 
 def ensure_buckets() -> None:
     client = get_client()
-    for bucket in (settings.minio_bucket_manifests, settings.minio_bucket_proofs, settings.minio_bucket_branding):
+    for bucket in (settings.minio_bucket_proofs, settings.minio_bucket_branding):
         if not client.bucket_exists(bucket):
             client.make_bucket(bucket)
 

@@ -8,6 +8,10 @@ export interface CurrentUser {
   role: string;
   branch_id: number | null;
   tenant_id: number | null;
+  department?: string | null;
+  subgroup?: string | null;
+  permissions?: string[];
+  navigation_layout?: "sidebar" | "top";
 }
 
 interface AuthState {
@@ -16,6 +20,7 @@ interface AuthState {
   refresh: () => Promise<void>;
   logout: () => void;
   hasRole: (...roles: string[]) => boolean;
+  hasPermission: (permission: string, ...fallbackRoles: string[]) => boolean;
 }
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
@@ -52,13 +57,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return roles.includes(user.role);
   }
 
+  function hasPermission(permission: string, ...fallbackRoles: string[]) {
+    if (!user) return false;
+    if (user.role === "admin_global") return true;
+    return Boolean(user.permissions?.includes(permission)) || fallbackRoles.includes(user.role);
+  }
+
   function logout() {
     setUser(null);
     apiLogout();
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, refresh, logout, hasRole }}>
+    <AuthContext.Provider value={{ user, loading, refresh, logout, hasRole, hasPermission }}>
       {children}
     </AuthContext.Provider>
   );

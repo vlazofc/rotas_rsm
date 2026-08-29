@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,7 +30,12 @@ EXTENSION_TYPES = {
 class BrandingOut(BaseModel):
     app_name: str | None = None
     app_subtitle: str | None = None
+    login_intro_text: str | None = None
+    login_layout: str = "centered"
     primary_color: str | None = None
+    sidebar_background_color: str | None = None
+    sidebar_text_color: str | None = None
+    sidebar_active_color: str | None = None
     enabled_locales: list[str] | None = None
     topbar_extends_sidebar: bool = True
     logo_url: str | None = None
@@ -67,7 +73,7 @@ def _branding_for_tenant(db: Session, tenant_id: int | None) -> BrandingSettings
     quando o tenant ainda não personalizou nada."""
     if tenant_id is not None:
         row = db.scalar(select(BrandingSettings).where(BrandingSettings.tenant_id == tenant_id))
-        if row is not None and (row.app_name or row.logo_attachment_id or row.primary_color):
+        if row is not None and (row.app_name or row.logo_attachment_id or row.primary_color or row.login_intro_text or row.login_layout != "centered" or row.sidebar_background_color or row.sidebar_text_color or row.sidebar_active_color):
             return row
     return _get_or_create(db, None)
 
@@ -104,13 +110,30 @@ def _serialize(row: BrandingSettings) -> BrandingOut:
     return BrandingOut(
         app_name=row.app_name,
         app_subtitle=row.app_subtitle,
+        login_intro_text=row.login_intro_text,
+        login_layout=row.login_layout or "centered",
         primary_color=row.primary_color,
+        sidebar_background_color=row.sidebar_background_color,
+        sidebar_text_color=row.sidebar_text_color,
+        sidebar_active_color=row.sidebar_active_color,
         enabled_locales=[code for code in row.enabled_locales.split(",") if code] if row.enabled_locales else None,
         topbar_extends_sidebar=row.topbar_extends_sidebar,
-        logo_url=storage.get_presigned_url(logo.bucket, logo.storage_key, expires_seconds=60 * 60 * 24) if logo else None,
-        logo_rail_url=storage.get_presigned_url(logo_rail.bucket, logo_rail.storage_key, expires_seconds=60 * 60 * 24) if logo_rail else None,
-        background_url=storage.get_presigned_url(background.bucket, background.storage_key, expires_seconds=60 * 60 * 24) if background else None,
-        favicon_url=storage.get_presigned_url(favicon.bucket, favicon.storage_key, expires_seconds=60 * 60 * 24) if favicon else None,
+        logo_url=f"{settings.api_v1_prefix}/branding/assets/{logo.id}" if logo else None,
+        logo_rail_url=f"{settings.api_v1_prefix}/branding/assets/{logo_rail.id}" if logo_rail else None,
+        background_url=f"{settings.api_v1_prefix}/branding/assets/{background.id}" if background else None,
+        favicon_url=f"{settings.api_v1_prefix}/branding/assets/{favicon.id}" if favicon else None,
+    )
+
+
+@router.get("/assets/{attachment_id}", include_in_schema=False)
+def branding_asset(attachment_id: int, db: Session = Depends(get_db)):
+    attachment = db.get(Attachment, attachment_id)
+    if attachment is None or attachment.bucket != settings.minio_bucket_branding:
+        raise HTTPException(status_code=404, detail="Imagem não encontrada.")
+    return Response(
+        content=storage.get_object_bytes(attachment.bucket, attachment.storage_key),
+        media_type=attachment.content_type or "application/octet-stream",
+        headers={"Cache-Control": "public, max-age=86400, immutable", "X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -135,7 +158,12 @@ async def update_branding(
     tenant_id: int | None = None,
     app_name: str | None = Form(None),
     app_subtitle: str | None = Form(None),
+    login_intro_text: str | None = Form(None),
+    login_layout: str | None = Form(None),
     primary_color: str | None = Form(None),
+    sidebar_background_color: str | None = Form(None),
+    sidebar_text_color: str | None = Form(None),
+    sidebar_active_color: str | None = Form(None),
     enabled_locales: str | None = Form(None),
     topbar_extends_sidebar: bool | None = Form(None),
     remove_logo: bool = Form(False),
@@ -160,8 +188,20 @@ async def update_branding(
         updates["app_name"] = app_name.strip() or None
     if app_subtitle is not None:
         updates["app_subtitle"] = app_subtitle.strip() or None
+    if login_intro_text is not None:
+        updates["login_intro_text"] = login_intro_text.strip()[:1000] or None
+    if login_layout is not None:
+        if login_layout not in {"centered", "institutional", "side_form"}:
+            raise HTTPException(status_code=422, detail="Layout de login inválido.")
+        updates["login_layout"] = login_layout
     if primary_color is not None:
         updates["primary_color"] = primary_color.strip() or None
+    for color_field, color_value in (("sidebar_background_color", sidebar_background_color), ("sidebar_text_color", sidebar_text_color), ("sidebar_active_color", sidebar_active_color)):
+        if color_value is not None:
+            normalized = color_value.strip()
+            if normalized and not re.fullmatch(r"#[0-9a-fA-F]{6}", normalized):
+                raise HTTPException(status_code=422, detail="Cor da barra inválida.")
+            updates[color_field] = normalized or None
     if enabled_locales is not None:
         codes = [code.strip() for code in enabled_locales.split(",") if code.strip()]
         invalid = [code for code in codes if code not in SUPPORTED_LOCALES]

@@ -47,6 +47,8 @@ def get_current_user(
     user = db.get(User, int(user_id))
     if user is None or not user.active:
         raise cred_exc
+    if payload.get("auth_version") != user.auth_version:
+        raise cred_exc
     return ensure_user_scope(user, db)
 
 
@@ -70,6 +72,8 @@ def get_current_user_optional(
         return None
     user = db.get(User, int(user_id))
     if user is None or not user.active:
+        return None
+    if payload.get("auth_version") != user.auth_version:
         return None
     try:
         return ensure_user_scope(user, db)

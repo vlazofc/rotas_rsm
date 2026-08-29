@@ -9,6 +9,7 @@ from app.core.permissions import Role
 from app.db.models import DeliveryFailureReason, DockSession, Route, RouteEvent, RouteStop, User
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
+from app.services.cache import get_json, set_json
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -26,6 +27,11 @@ def summary(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    cache_key = f"dashboard:v1:{user.tenant_id}:{user.branch_id}:{range}:{status}:{period_ref or '-'}"
+    cached = get_json(cache_key)
+    if cached is not None:
+        return cached
+
     branch_filter = []
     if user.branch_id:
         branch_filter.append(Route.branch_id == user.branch_id)
@@ -91,7 +97,7 @@ def summary(
         )
     ) or 0
 
-    return {
+    result = {
         "periodo": range,
         "filtro_status": status,
         "rotas_total": total_routes,
@@ -130,6 +136,8 @@ def summary(
         "serie_carga": _build_load_series(routes, bucket_range, start_date, end_date),
         "serie_pedagio": _build_toll_series(routes, bucket_range, start_date, end_date),
     }
+    set_json(cache_key, result, 15)
+    return result
 
 
 def _status_set(status: str) -> set[str]:

@@ -100,7 +100,7 @@ export default function Dashboard() {
 
   const load = (showLoading: boolean) => {
     if (showLoading) setLoading(true);
-    api.get<DashboardSummary>("/dashboard/summary", {
+    return api.get<DashboardSummary>("/dashboard/summary", {
       params: { range: period, status: routeFilter, period_ref: period === "week" ? selectedWeek : undefined },
     })
       .then((r) => setData(r.data))

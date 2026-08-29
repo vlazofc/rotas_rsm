@@ -2,7 +2,7 @@ import io
 import re
 import uuid
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,23 +11,43 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from pydantic import BaseModel
+from dateutil.relativedelta import relativedelta
 from sqlalchemy import extract, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.permissions import Role, require_feature, require_roles, require_same_branch
-from app.db.models import Attachment, Driver, Expense, Route, User, Vehicle
+from app.core.permissions import (
+    FINANCE_EXPENSE_APPROVE, FINANCE_EXPENSE_CREATE, FINANCE_VIEW, Role, has_permission, require_feature,
+    require_permission, require_roles, require_same_branch,
+)
+from app.db.models import Attachment, Driver, Expense, ExpenseApprovalEvent, FinancialAccount, FinancialCategory, Notification, Route, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services import storage
 from app.services.audit import log, log_update, snapshot
+from app.services.accounting import post_expense
 
 router = APIRouter(prefix="/expenses", tags=["expenses"], dependencies=[Depends(require_feature("feature_financeiro"))])
+_EXPENSE_CREATOR = require_permission(
+    FINANCE_EXPENSE_CREATE, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO,
+    Role.OPERADOR_LOGISTICO, Role.MOTORISTA,
+)
+_EXPENSE_APPROVER = require_permission(FINANCE_EXPENSE_APPROVE, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO)
+APPROVAL_STATUSES = {"pending", "in_review", "adjustment_requested", "approved", "rejected"}
 
 ALLOWED_REASONS = {
     "combustivel", "manutencao", "limpeza", "outros",
     "diaria_motorista", "diaria_ajudante", "frete_transportadora",
 }
+
+@router.get("/categories", dependencies=[Depends(_EXPENSE_CREATOR)])
+def expense_categories(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = db.scalars(select(FinancialCategory).where(
+        FinancialCategory.tenant_id == user.tenant_id,
+        FinancialCategory.kind == "payable",
+        FinancialCategory.active.is_(True),
+    ).order_by(FinancialCategory.name)).all()
+    return [{"code": row.code, "name": row.name} for row in rows]
 ALLOWED_TYPES = {"application/pdf", "image/png", "image/jpeg", "image/jpg", "image/webp"}
 EXTENSION_TYPES = {
     ".pdf": "application/pdf",
@@ -41,7 +61,7 @@ EXTENSION_TYPES = {
 class ExpenseOut(BaseModel):
     id: int
     branch_id: int
-    driver_id: int
+    driver_id: int | None
     vehicle_id: int | None
     vehicle_plate: str | None = None
     user_id: int | None
@@ -50,7 +70,7 @@ class ExpenseOut(BaseModel):
     reason: str
     amount: Decimal | None
     notes: str | None
-    attachment_id: int
+    attachment_id: int | None
     proof_filename: str | None = None
     proof_url: str | None = None
     odometer_km: float | None = None
@@ -58,6 +78,18 @@ class ExpenseOut(BaseModel):
     odometer_photo_url: str | None = None
     driver_name: str | None = None
     created_at: datetime
+    source: str = "manual"
+    maintenance_order_id: int | None = None
+    approval_status: str = "pending"
+    submitted_at: datetime | None = None
+    reviewed_by_id: int | None = None
+    reviewer_name: str | None = None
+    reviewed_at: datetime | None = None
+    decision_note: str | None = None
+    submitter_name: str | None = None
+    due_date: date | None = None
+    recurrence: str = "none"
+    recurrence_count: int = 1
 
     class Config:
         from_attributes = True
@@ -71,6 +103,21 @@ class ExpenseUpdate(BaseModel):
     route_id: int | None = None
     vehicle_id: int | None = None
     odometer_km: float | None = None
+
+
+class ExpenseDecisionIn(BaseModel):
+    action: str
+    comment: str | None = None
+
+
+class ApprovalEventOut(BaseModel):
+    id: int
+    actor_id: int | None
+    actor_name: str | None = None
+    from_status: str | None
+    to_status: str
+    comment: str | None
+    created_at: datetime
 
 
 def _safe_filename(filename: str | None) -> str:
@@ -117,11 +164,15 @@ def _driver_for_user(db: Session, user: User) -> Driver:
 
 
 def _assert_expense_access(user: User, expense: Expense) -> None:
-    if user.role == Role.ADMIN_GLOBAL.value:
+    driver_expense = expense.source == "driver"
+    if user.role == Role.MOTORISTA.value:
+        if driver_expense and expense.user_id == user.id: return
+        raise HTTPException(status_code=403, detail="Acesso restrito às próprias despesas de motorista.")
+    if user.role == Role.ADMIN_GLOBAL.value: return
+    if has_permission(user, FINANCE_VIEW, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO):
+        require_same_branch(user, expense.branch_id)
         return
-    if user.role == Role.MOTORISTA.value and expense.user_id == user.id:
-        return
-    if user.role not in {Role.GESTOR_BRASIL.value, Role.GESTOR_FINANCEIRO.value}:
+    if driver_expense or user.role != Role.OPERADOR_LOGISTICO.value:
         raise HTTPException(status_code=403, detail="Perfil sem permissão para esta ação.")
     require_same_branch(user, expense.branch_id)
 
@@ -153,22 +204,79 @@ def _serialize(expense: Expense) -> ExpenseOut:
         odometer_photo_url=odometer_photo_url,
         driver_name=expense.driver.name if expense.driver else None,
         created_at=expense.created_at,
+        source=expense.source,
+        maintenance_order_id=expense.maintenance_order_id,
+        approval_status=expense.approval_status,
+        submitted_at=expense.submitted_at,
+        reviewed_by_id=expense.reviewed_by_id,
+        reviewer_name=expense.reviewer.name if getattr(expense, "reviewer", None) else None,
+        reviewed_at=expense.reviewed_at,
+        decision_note=expense.decision_note,
+        submitter_name=expense.submitter.name if getattr(expense, "submitter", None) else None,
+        due_date=expense.due_date, recurrence=expense.recurrence, recurrence_count=expense.recurrence_count,
     )
 
 
-def _validate_reason(reason: str) -> str:
+def _approval_event(db: Session, expense: Expense, actor: User, target: str, comment: str | None = None) -> None:
+    db.add(ExpenseApprovalEvent(
+        expense_id=expense.id, actor_id=actor.id, from_status=expense.approval_status,
+        to_status=target, comment=(comment or "").strip() or None,
+    ))
+
+
+def _notify(db: Session, user_id: int | None, title: str, body: str) -> None:
+    if user_id:
+        db.add(Notification(user_id=user_id, title=title, body=body))
+
+
+def _create_payable(db: Session, expense: Expense, actor: User) -> FinancialAccount:
+    account = db.scalar(select(FinancialAccount).where(FinancialAccount.expense_id == expense.id))
+    if account:
+        return account
+    if expense.amount is None or expense.amount <= 0:
+        raise HTTPException(status_code=409, detail="Informe um valor maior que zero antes da aprovação.")
+    group=f"expense-{expense.id}";count=max(1,expense.recurrence_count or 1);months={"monthly":1,"quarterly":3,"semiannual":6,"annual":12}.get(expense.recurrence,0);first_due=expense.due_date or max(expense.expense_date,date.today())
+    account = FinancialAccount(
+        branch_id=expense.branch_id, kind="payable",
+        description=f"Despesa #{expense.id} · {expense.reason}",
+        counterparty=expense.driver.name if expense.driver else "Despesa administrativa",
+        category=expense.reason, document=expense.attachment.storage_key if expense.attachment else None,
+        issue_date=expense.expense_date, due_date=first_due,
+        amount=expense.amount, notes=expense.notes, created_by=actor.id, expense_id=expense.id,
+        recurrence_group=group if months else None,recurrence_sequence=1 if months else None,recurrence_total=count if months else None,
+    )
+    db.add(account)
+    db.flush()
+    if months:
+        for sequence in range(2,count+1):
+            due=first_due+relativedelta(months=months*(sequence-1))
+            db.add(FinancialAccount(branch_id=expense.branch_id,kind="payable",description=f"Despesa recorrente #{expense.id} · {expense.reason} ({sequence}/{count})",counterparty=account.counterparty,category=expense.reason,document=account.document,issue_date=due,due_date=due,amount=expense.amount,status="pendente",notes=expense.notes,created_by=actor.id,recurrence_group=group,recurrence_sequence=sequence,recurrence_total=count))
+    return account
+
+
+def _validate_reason(reason: str, db: Session, user: User) -> str:
     value = reason.strip().lower()
-    if value not in ALLOWED_REASONS:
-        raise HTTPException(status_code=400, detail="Motivo inválido.")
+    category = db.scalar(select(FinancialCategory).where(
+        FinancialCategory.tenant_id == user.tenant_id,
+        FinancialCategory.kind == "payable",
+        FinancialCategory.code == value,
+        FinancialCategory.active.is_(True),
+    ))
+    if category is None: raise HTTPException(status_code=400, detail="Selecione uma categoria de despesa ativa.")
     return value
 
 
 def _expense_query(user: User):
-    stmt = select(Expense).join(Driver, Driver.id == Expense.driver_id)
+    stmt = select(Expense).outerjoin(Driver, Driver.id == Expense.driver_id)
     if user.role == Role.MOTORISTA.value:
-        stmt = stmt.where(Expense.user_id == user.id)
-    elif user.branch_id:
-        stmt = stmt.where(Expense.branch_id == user.branch_id)
+        stmt = stmt.where(Expense.user_id == user.id, Expense.source == "driver")
+    elif has_permission(user, FINANCE_VIEW, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO):
+        if user.role != Role.ADMIN_GLOBAL.value and user.branch_id:
+            stmt = stmt.where(Expense.branch_id == user.branch_id)
+    elif has_permission(user, FINANCE_EXPENSE_CREATE, Role.OPERADOR_LOGISTICO) and user.branch_id:
+        stmt = stmt.where(Expense.branch_id == user.branch_id, Expense.source != "driver")
+    else:
+        raise HTTPException(status_code=403, detail="Acesso não liberado para despesas administrativas.")
     return stmt
 
 
@@ -192,7 +300,7 @@ def list_expenses(
     return [_serialize(expense) for expense in expenses]
 
 
-@router.post("", response_model=ExpenseOut)
+@router.post("", response_model=ExpenseOut, dependencies=[Depends(_EXPENSE_CREATOR)])
 async def create_expense(
     expense_date: date = Form(...),
     reason: str = Form(...),
@@ -202,45 +310,55 @@ async def create_expense(
     driver_id: int | None = Form(None),
     vehicle_id: int | None = Form(None),
     odometer_km: float | None = Form(None),
+    due_date: date | None = Form(None),
+    recurrence: str = Form("none"),
+    recurrence_count: int = Form(1),
     proof: UploadFile = File(...),
     odometer_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    reason = _validate_reason(reason)
+    reason = _validate_reason(reason, db, user)
+    if recurrence not in {"none","monthly","quarterly","semiannual","annual"}: raise HTTPException(status_code=422, detail="Recorrência inválida.")
+    if user.role == Role.MOTORISTA.value and recurrence != "none": raise HTTPException(status_code=403, detail="Recorrência é exclusiva para despesas administrativas.")
+    if recurrence != "none" and not 2 <= recurrence_count <= 120: raise HTTPException(status_code=422, detail="Informe entre 2 e 120 ocorrências.")
     if reason == "combustivel" and odometer_km is None:
         raise HTTPException(status_code=422, detail="Informe o valor do hodômetro no abastecimento.")
     if reason == "combustivel" and (odometer_photo is None or not odometer_photo.filename):
         raise HTTPException(status_code=422, detail="Anexe uma foto do hodômetro.")
-    driver = db.get(Driver, driver_id) if driver_id and user.role != Role.MOTORISTA.value else _driver_for_user(db, user)
-    if driver is None:
-        raise HTTPException(status_code=404, detail="Motorista não encontrado.")
-    require_same_branch(user, driver.branch_id)
     route = db.get(Route, route_id) if route_id else None
     if route_id and route is None:
         raise HTTPException(status_code=404, detail="Rota não encontrada.")
     if route is not None:
         require_same_branch(user, route.branch_id)
+    effective_driver_id = route.driver_id if route is not None else driver_id
+    driver = _driver_for_user(db, user) if user.role == Role.MOTORISTA.value else (db.get(Driver, effective_driver_id) if effective_driver_id else None)
+    if (user.role == Role.MOTORISTA.value or route is not None) and driver is None:
+        raise HTTPException(status_code=422, detail="Informe o motorista para despesas do motorista ou vinculadas a uma viagem.")
+    if driver is not None: require_same_branch(user, driver.branch_id)
     if not vehicle_id and route and route.vehicle_id:
         vehicle_id = route.vehicle_id
-    if not vehicle_id:
+    if not vehicle_id and (user.role == Role.MOTORISTA.value or reason == "combustivel"):
         raise HTTPException(status_code=422, detail="Informe a placa do veículo.")
-    vehicle = db.get(Vehicle, vehicle_id)
+    vehicle = db.get(Vehicle, vehicle_id) if vehicle_id else None
     if vehicle_id and vehicle is None:
         raise HTTPException(status_code=404, detail="Veículo não encontrado.")
     if vehicle is not None:
         require_same_branch(user, vehicle.branch_id)
-    attachment = await _save_proof(proof, driver.branch_id, expense_date)
+    branch_id = route.branch_id if route is not None else vehicle.branch_id if vehicle is not None else user.branch_id
+    if branch_id is None:
+        raise HTTPException(status_code=422, detail="Informe uma rota ou veículo para identificar a filial do lançamento.")
+    attachment = await _save_proof(proof, branch_id, expense_date)
     db.add(attachment)
     db.flush()
     odometer_attachment = None
     if odometer_photo is not None and odometer_photo.filename:
-        odometer_attachment = await _save_proof(odometer_photo, driver.branch_id, expense_date, folder="hodometro")
+        odometer_attachment = await _save_proof(odometer_photo, branch_id, expense_date, folder="hodometro")
         db.add(odometer_attachment)
         db.flush()
     expense = Expense(
-        branch_id=driver.branch_id,
-        driver_id=driver.id,
+        branch_id=branch_id,
+        driver_id=driver.id if driver else None,
         vehicle_id=vehicle.id if vehicle else None,
         user_id=user.id,
         route_id=route_id,
@@ -251,12 +369,66 @@ async def create_expense(
         attachment_id=attachment.id,
         odometer_km=odometer_km,
         odometer_attachment_id=odometer_attachment.id if odometer_attachment else None,
+        source="driver" if user.role == Role.MOTORISTA.value else "administrative",
+        approval_status="pending", submitted_at=datetime.now(timezone.utc),
+        due_date=due_date, recurrence=recurrence, recurrence_count=recurrence_count if recurrence != "none" else 1,
     )
     db.add(expense)
     db.flush()
     log(db, user_id=user.id, action="create", entity="expense", entity_id=expense.id)
+    db.add(ExpenseApprovalEvent(expense_id=expense.id, actor_id=user.id, from_status=None, to_status="pending", comment="Enviada para análise financeira."))
     db.commit()
     db.refresh(expense)
+    return _serialize(expense)
+
+
+@router.get("/approval-tasks", response_model=list[ExpenseOut], dependencies=[Depends(_EXPENSE_APPROVER)])
+def approval_tasks(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    stmt = select(Expense).where(Expense.approval_status.in_(["pending", "in_review"]))
+    if user.role != Role.ADMIN_GLOBAL.value:
+        stmt = stmt.where(Expense.branch_id == user.branch_id)
+    rows = db.scalars(stmt.order_by(Expense.submitted_at, Expense.created_at)).all()
+    return [_serialize(row) for row in rows]
+
+
+@router.get("/{expense_id}/approval-history", response_model=list[ApprovalEventOut])
+def approval_history(expense_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    expense = db.get(Expense, expense_id)
+    if expense is None:
+        raise HTTPException(status_code=404, detail="Despesa não encontrada.")
+    _assert_expense_access(user, expense)
+    rows = db.scalars(select(ExpenseApprovalEvent).where(ExpenseApprovalEvent.expense_id == expense_id).order_by(ExpenseApprovalEvent.id)).all()
+    actor_ids = {row.actor_id for row in rows if row.actor_id}
+    names = dict(db.execute(select(User.id, User.name).where(User.id.in_(actor_ids))).all()) if actor_ids else {}
+    return [ApprovalEventOut(id=row.id, actor_id=row.actor_id, actor_name=names.get(row.actor_id), from_status=row.from_status, to_status=row.to_status, comment=row.comment, created_at=row.created_at) for row in rows]
+
+
+@router.post("/{expense_id}/decision", response_model=ExpenseOut, dependencies=[Depends(_EXPENSE_APPROVER)])
+def decide_expense(expense_id: int, data: ExpenseDecisionIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    expense = db.scalar(select(Expense).where(Expense.id == expense_id).with_for_update())
+    if expense is None:
+        raise HTTPException(status_code=404, detail="Despesa não encontrada.")
+    require_same_branch(actor, expense.branch_id)
+    action = data.action.strip().lower()
+    targets = {"start_review": "in_review", "approve": "approved", "reject": "rejected", "request_adjustment": "adjustment_requested"}
+    if action not in targets:
+        raise HTTPException(status_code=422, detail="Decisão inválida.")
+    if expense.approval_status not in {"pending", "in_review"}:
+        raise HTTPException(status_code=409, detail="Esta solicitação já foi finalizada ou devolvida para ajuste.")
+    if action in {"reject", "request_adjustment"} and not (data.comment or "").strip():
+        raise HTTPException(status_code=422, detail="Informe a justificativa da decisão.")
+    target = targets[action]
+    _approval_event(db, expense, actor, target, data.comment)
+    expense.approval_status = target
+    expense.reviewed_by_id = actor.id
+    expense.reviewed_at = datetime.now(timezone.utc)
+    expense.decision_note = (data.comment or "").strip() or None
+    account = _create_payable(db, expense, actor) if target == "approved" else None
+    if target == "approved":
+        post_expense(db, expense, actor.id)
+    _notify(db, expense.user_id, f"Despesa #{expense.id}: {target}", expense.decision_note or "Decisão registrada pelo financeiro.")
+    log(db, user_id=actor.id, action=action, entity="expense_approval", entity_id=expense.id, detail=f"status={target}; conta={account.id if account else '-'}; justificativa={expense.decision_note or '-'}")
+    db.commit(); db.refresh(expense)
     return _serialize(expense)
 
 
@@ -278,8 +450,14 @@ async def update_expense(
     expense = db.get(Expense, expense_id)
     if expense is None:
         raise HTTPException(status_code=404, detail="Despesa não encontrada.")
+    if expense.maintenance_order_id is not None:
+        raise HTTPException(status_code=409, detail="Despesa gerada por OS deve ser alterada pelo fluxo de aprovação da ordem de serviço.")
     _assert_expense_access(user, expense)
-    effective_reason = _validate_reason(reason) if reason else expense.reason
+    if expense.approval_status in {"approved", "rejected", "in_review"}:
+        raise HTTPException(status_code=409, detail="Despesa em análise ou finalizada não pode ser alterada.")
+    if expense.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Somente o lançador pode alterar a solicitação; o financeiro deve pedir ajuste.")
+    effective_reason = _validate_reason(reason, db, user) if reason else expense.reason
     if effective_reason == "combustivel":
         if odometer_km is None and expense.odometer_km is None:
             raise HTTPException(status_code=422, detail="Informe o valor do hodômetro no abastecimento.")
@@ -287,7 +465,7 @@ async def update_expense(
             raise HTTPException(status_code=422, detail="Anexe uma foto do hodômetro.")
     updates = {
         "expense_date": expense_date,
-        "reason": _validate_reason(reason) if reason else None,
+        "reason": _validate_reason(reason, db, user) if reason else None,
         "amount": amount,
         "notes": notes,
         "route_id": route_id,
@@ -313,6 +491,13 @@ async def update_expense(
         db.add(odometer_attachment)
         db.flush()
         expense.odometer_attachment_id = odometer_attachment.id
+    if expense.approval_status == "adjustment_requested":
+        _approval_event(db, expense, user, "pending", "Ajuste realizado e reenviado ao financeiro.")
+        expense.approval_status = "pending"
+        expense.submitted_at = datetime.now(timezone.utc)
+        expense.reviewed_by_id = None
+        expense.reviewed_at = None
+        expense.decision_note = None
     log_update(db, user_id=user.id, entity="expense", entity_id=expense.id, before=before, obj=expense, updates=updates)
     db.commit()
     db.refresh(expense)
@@ -321,10 +506,16 @@ async def update_expense(
 
 @router.delete("/{expense_id}")
 def delete_expense(expense_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    expense = db.get(Expense, expense_id)
+    expense = db.scalar(select(Expense).where(Expense.id == expense_id).with_for_update())
     if expense is None:
         raise HTTPException(status_code=404, detail="Despesa não encontrada.")
+    if expense.maintenance_order_id is not None:
+        raise HTTPException(status_code=409, detail="Despesa gerada por OS deve ser revertida pela ordem de serviço.")
     _assert_expense_access(user, expense)
+    if expense.approval_status not in {"pending", "adjustment_requested"}:
+        raise HTTPException(status_code=409, detail="Despesa em análise ou finalizada não pode ser excluída.")
+    if expense.user_id != user.id and user.role != Role.ADMIN_GLOBAL.value:
+        raise HTTPException(status_code=403, detail="Somente o lançador pode excluir esta solicitação.")
     db.delete(expense)
     log(db, user_id=user.id, action="delete", entity="expense", entity_id=expense_id)
     db.commit()

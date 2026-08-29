@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class LoginRequest(BaseModel):
@@ -19,6 +19,10 @@ class UserOut(BaseModel):
     role: str
     branch_id: int | None
     tenant_id: int | None = None
+    department: str | None = None
+    subgroup: str | None = None
+    permissions: list[str] = Field(default_factory=list)
+    navigation_layout: str = "sidebar"
 
     class Config:
         from_attributes = True

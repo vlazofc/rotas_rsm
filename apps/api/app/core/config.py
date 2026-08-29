@@ -1,7 +1,7 @@
 """Configuração central — lê todas as variáveis do .env."""
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,11 +22,16 @@ class Settings(BaseSettings):
 
     # Banco
     database_url: str
+    db_pool_size: int = 5
+    db_max_overflow: int = 2
+    db_pool_timeout_seconds: int = 10
+    db_pool_recycle_seconds: int = 1800
 
     # Redis / Celery
     redis_url: str
     celery_broker_url: str
     celery_result_backend: str
+    api_rate_limit: str = "6000/minute"
 
     # MinIO
     minio_endpoint: str = "minio:9000"
@@ -35,7 +40,6 @@ class Settings(BaseSettings):
     minio_root_password: str = "trocar_senha_minio"
     minio_use_ssl: bool = False
     minio_public_secure: bool | None = None
-    minio_bucket_manifests: str = "manifestos"
     minio_bucket_proofs: str = "comprovantes"
     minio_bucket_branding: str = "custom"
 
@@ -44,24 +48,31 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 7
+    # Chave exclusiva para cifrar credenciais de integrações. Se vazia, deriva do
+    # JWT_SECRET para compatibilidade; em produção, configure uma chave distinta.
+    integration_encryption_key: str = ""
 
-    # Microsoft Entra
-    auth_mode: str = "local"  # local | entra
-    microsoft_tenant_id: str = ""
-    microsoft_client_id: str = ""
-    microsoft_client_secret: str = ""
-    microsoft_redirect_uri: str = ""
+    auth_mode: str = "local"
 
-    # OCR
-    ocr_engine: str = "easyocr"
-    ocr_lang: str = "pt"
-    ocr_min_confidence: float = 0.82
     max_upload_mb: int = 25
 
     # Seed admin
     seed_admin_email: str = "admin@admmendes.com.br"
     seed_admin_password: str = "trocar_admin_senha"
     seed_admin_name: str = "Administrador Global"
+
+    # Pesquisa diária de alterações tributárias (Groq Compound + web search).
+    groq_api_key: str = ""
+    groq_model: str = "groq/compound"
+    # Motor isolado do Agente Executivo. EPORTS é mantido por compatibilidade
+    # com o nome da variável já adotado no ambiente deste projeto.
+    groq_api_eports_key: str = ""
+    groq_reports_api_key: str = ""
+    groq_reports_model: str = "openai/gpt-oss-120b"
+
+    @property
+    def executive_groq_api_key(self) -> str:
+        return self.groq_api_eports_key or self.groq_reports_api_key
 
     # Roteirização (router_run — maestro/GraphHopper)
     router_base_url: str = "http://localhost:3005"
@@ -97,10 +108,33 @@ class Settings(BaseSettings):
             return self.minio_public_secure
         return self.minio_use_ssl
 
-    @field_validator("ocr_engine")
+    @field_validator("auth_mode")
     @classmethod
-    def _engine(cls, v: str) -> str:
-        return v.lower()
+    def _auth_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized != "local":
+            raise ValueError("Somente AUTH_MODE=local está disponível; o fluxo Entra ID foi removido por estar incompleto.")
+        return normalized
+
+    @model_validator(mode="after")
+    def _reject_insecure_production_settings(self):
+        if self.app_env.strip().lower() not in {"production", "prod"}:
+            return self
+        insecure_markers = ("trocar", "change", "cole_aqui", "seudominio")
+        secrets = {
+            "JWT_SECRET": self.jwt_secret,
+            "MINIO_ROOT_PASSWORD": self.minio_root_password,
+            "SEED_ADMIN_PASSWORD": self.seed_admin_password,
+        }
+        invalid = [name for name, value in secrets.items()
+                   if len(value.strip()) < 12 or any(marker in value.lower() for marker in insecure_markers)]
+        if invalid:
+            raise ValueError(f"Configuração insegura em produção: {', '.join(invalid)}")
+        if len(self.jwt_secret.strip()) < 32:
+            raise ValueError("JWT_SECRET deve ter pelo menos 32 caracteres em produção.")
+        if any(origin.startswith("http://") or "localhost" in origin for origin in self.cors_origins):
+            raise ValueError("ALLOWED_ORIGINS de produção deve conter somente origens HTTPS públicas.")
+        return self
 
 
 @lru_cache

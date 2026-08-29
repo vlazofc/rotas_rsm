@@ -24,6 +24,12 @@ class OperationalSettingsIn(BaseModel):
 class OperationalSettingsOut(OperationalSettingsIn):
     pass
 
+class AlertSettingsIn(BaseModel):
+    alert_due_days: int = 3
+    alert_document_days: int = 30
+    tire_warning_mm: float = 3.0
+    tire_critical_mm: float = 1.6
+
 
 FIELDS = list(OperationalSettingsIn.model_fields)
 
@@ -50,7 +56,7 @@ def get_operational_settings(db: Session = Depends(get_db)):
 def update_operational_settings(
     data: OperationalSettingsIn,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_roles(Role.ADMIN_GLOBAL)),
+    actor: User = Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)),
 ):
     row = get_or_create_operational_settings(db)
     before = snapshot(row, FIELDS)
@@ -60,3 +66,17 @@ def update_operational_settings(
     db.commit()
     db.refresh(row)
     return serialize_operational_settings(row)
+
+@router.get("/alerts", response_model=AlertSettingsIn)
+def get_alert_settings(db: Session = Depends(get_db)):
+    row=get_or_create_operational_settings(db)
+    return AlertSettingsIn(**{field:getattr(row,field) for field in AlertSettingsIn.model_fields})
+
+@router.put("/alerts", response_model=AlertSettingsIn)
+def update_alert_settings(data:AlertSettingsIn,db:Session=Depends(get_db),actor:User=Depends(require_roles(Role.ADMIN_GLOBAL,Role.GESTOR_BRASIL))):
+    if not 1<=data.alert_due_days<=90 or not 1<=data.alert_document_days<=365 or not 0<=data.tire_critical_mm<=data.tire_warning_mm<=30:
+        from fastapi import HTTPException
+        raise HTTPException(422,"Parâmetros de alerta fora dos limites permitidos.")
+    row=get_or_create_operational_settings(db);before=snapshot(row,list(AlertSettingsIn.model_fields))
+    for field,value in data.model_dump().items():setattr(row,field,value)
+    log_update(db,user_id=actor.id,entity="alert_settings",entity_id=row.id,before=before,obj=row,updates=data.model_dump());db.commit();db.refresh(row);return data

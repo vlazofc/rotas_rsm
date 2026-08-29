@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import api from "../services/api";
+import {appPrompt} from "../components/AppDialog";
 import { useAuth } from "../context/AuthContext";
 
 interface UserRow {
   id: number; email: string; name: string; role: string;
   branch_id: number | null; active: boolean;
+  blocked: boolean; status_reason?: string | null;
+  department?: string | null; subgroup?: string | null; permissions?: string[];
 }
 interface RoleOption {
   value: string;
@@ -19,11 +22,19 @@ interface BranchOption {
   name: string;
 }
 
-const EMPTY = { email: "", name: "", role: "motorista", password: "", branch_id: "" };
+const EMPTY = { email: "", name: "", role: "motorista", password: "", branch_id: "", department: "", subgroup: "", permissions: [] as string[] };
+const ACCESS_OPTIONS = [
+  ["finance.view", "Visualizar todo o financeiro (despesas, receitas, saldos e dashboard)"],
+  ["finance.expense.create", "Lançar despesas administrativas"],
+  ["finance.expense.approve", "Analisar e aprovar despesas de outros setores"],
+  ["finance.revenue.manage", "Lançar e alterar receitas por rota"],
+  ["finance.accounts.manage", "Gerenciar contas a pagar e receber"],
+] as const;
 const ROLE_ORDER = [
   "admin_global",
   "auditor",
   "gestor_brasil",
+  "gestor_financeiro",
   "motorista",
   "operador_logistico",
   "torre_controle",
@@ -62,7 +73,7 @@ export default function Users() {
 
   function startEdit(u: UserRow) {
     setError("");
-    setForm({ email: u.email, name: u.name, role: u.role, password: "", branch_id: u.branch_id ? String(u.branch_id) : "" });
+    setForm({ email: u.email, name: u.name, role: u.role, password: "", branch_id: u.branch_id ? String(u.branch_id) : "", department: u.department || "", subgroup: u.subgroup || "", permissions: u.permissions || [] });
     setEditing(u.id);
   }
 
@@ -74,11 +85,13 @@ export default function Users() {
         await api.post("/users", {
           email: form.email, name: form.name, role: form.role,
           password: form.password || null,
+          department: form.department || null, subgroup: form.subgroup || null, permissions: form.permissions,
           ...(isAdminGlobal && form.branch_id ? { branch_id: Number(form.branch_id) } : {}),
         });
       } else if (typeof editing === "number") {
         await api.put(`/users/${editing}`, {
-          name: form.name, role: form.role,
+          name: form.name, role: form.role, department: form.department || null,
+          subgroup: form.subgroup || null, permissions: form.permissions,
           ...(isAdminGlobal && form.branch_id ? { branch_id: Number(form.branch_id) } : {}),
         });
       }
@@ -89,9 +102,10 @@ export default function Users() {
     }
   }
 
-  async function toggleActive(u: UserRow) {
+  async function changeStatus(u:UserRow,action:"activate"|"deactivate"|"block"|"unblock") {
     try {
-      await api.put(`/users/${u.id}`, { active: !u.active });
+      let reason="";if(["deactivate","block"].includes(action)){const value=await appPrompt(`Informe o motivo para ${action==="block"?"bloquear":"desativar"} ${u.name}.`,{title:action==="block"?"Bloquear usuário":"Desativar usuário",label:"Motivo obrigatório",required:true,confirmLabel:action==="block"?"Bloquear":"Desativar"});if(value===null)return;reason=value}
+      await api.post(`/users/${u.id}/status`, { action, reason:reason||null });
       reload();
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? t("users.save_error"));
@@ -99,7 +113,7 @@ export default function Users() {
   }
 
   async function resetPassword(u: UserRow) {
-    const pwd = window.prompt(t("users.reset_prompt", { name: u.name }) ?? "");
+    const pwd = await appPrompt(t("users.reset_prompt", { name: u.name }) ?? "",{title:"Redefinir senha",label:"Nova senha",required:true,confirmLabel:"Redefinir senha"});
     if (!pwd) return;
     if (pwd.length < 8) { setError(t("users.password_short")); return; }
     try {
@@ -128,7 +142,8 @@ export default function Users() {
       {error && <p style={{ color: "#c00" }}>{error}</p>}
 
       {editing !== null && (
-        <form onSubmit={save} style={panel}>
+        <div className="modal-backdrop" onClick={() => setEditing(null)}>
+        <form onSubmit={save} className="modal-card driver-modal" onClick={(event) => event.stopPropagation()}>
           <h3 style={{ marginTop: 0 }}>{editing === "new" ? t("users.new") : t("users.edit")}</h3>
           <div style={grid}>
             <label style={field}>
@@ -151,6 +166,16 @@ export default function Users() {
                 ))}
               </select>
             </label>
+            <label style={field}>
+              <span>Setor</span>
+              <input style={input} value={form.department} placeholder="Ex.: Financeiro"
+                onChange={(e) => setForm({ ...form, department: e.target.value })} />
+            </label>
+            <label style={field}>
+              <span>Subgrupo</span>
+              <input style={input} value={form.subgroup} placeholder="Ex.: Contas a pagar"
+                onChange={(e) => setForm({ ...form, subgroup: e.target.value })} />
+            </label>
             {editing === "new" && (
               <label style={field}>
                 <span>{t("users.password")}</span>
@@ -171,11 +196,19 @@ export default function Users() {
               </label>
             )}
           </div>
+          <fieldset style={{ ...field, marginTop: 14, padding: 12, border: "1px solid #cbd5e1", borderRadius: 8 }}>
+            <legend>Acessos liberados pelo gestor</legend>
+            {ACCESS_OPTIONS.map(([code, label]) => <label key={code} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="checkbox" checked={form.permissions.includes(code)} onChange={(event) => setForm({ ...form, permissions: event.target.checked ? [...form.permissions, code] : form.permissions.filter(item => item !== code) })} />
+              <span>{label}</span>
+            </label>)}
+          </fieldset>
           <div style={{ marginTop: 12 }}>
             <button type="submit" style={primary}>{t("common.save")}</button>
             <button type="button" style={ghost} onClick={() => setEditing(null)}>{t("common.cancel")}</button>
           </div>
         </form>
+        </div>
       )}
 
       <table style={table}>
@@ -184,6 +217,7 @@ export default function Users() {
             <th style={th}>{t("users.name")}</th>
             <th style={th}>{t("users.email")}</th>
             <th style={th}>{t("users.role")}</th>
+            <th style={th}>Setor / subgrupo</th>
             {isAdminGlobal && <th style={th}>{t("users.branch")}</th>}
             <th style={th}>{t("users.active")}</th>
             <th style={th}>{t("users.actions")}</th>
@@ -191,17 +225,16 @@ export default function Users() {
         </thead>
         <tbody>
           {users.map((u) => (
-            <tr key={u.id} style={{ borderTop: "1px solid #eef2f7", opacity: u.active ? 1 : 0.5 }}>
+            <tr key={u.id} style={{ borderTop: "1px solid #eef2f7", opacity: u.active ? 1 : 0.65 }}>
               <td style={td}>{u.name}</td>
               <td style={td}>{u.email}</td>
               <td style={td}>{roleLabel(u.role)}</td>
+              <td style={td}>{[u.department, u.subgroup].filter(Boolean).join(" / ") || "—"}</td>
               {isAdminGlobal && <td style={td}>{branchName(u.branch_id)}</td>}
-              <td style={td}>{u.active ? t("common.yes") : t("common.no")}</td>
+              <td style={td}><span title={u.status_reason||""}>{u.blocked?"Bloqueado":u.active?"Ativo":"Inativo"}</span></td>
               <td style={td}>
                 <button style={mini} onClick={() => startEdit(u)}>{t("users.edit")}</button>
-                <button style={mini} onClick={() => toggleActive(u)} disabled={u.id === me?.id}>
-                  {u.active ? t("users.deactivate") : t("users.activate")}
-                </button>
+                {u.active?<><button style={mini} onClick={()=>void changeStatus(u,"deactivate")} disabled={u.id===me?.id}>Desativar</button><button style={{...mini,color:"#b42318"}} onClick={()=>void changeStatus(u,"block")} disabled={u.id===me?.id}>Bloquear</button></>:<button style={mini} onClick={()=>void changeStatus(u,u.blocked?"unblock":"activate")}>{u.blocked?"Desbloquear":"Ativar"}</button>}
                 <button style={mini} onClick={() => resetPassword(u)}>{t("users.reset_password")}</button>
               </td>
             </tr>
@@ -213,8 +246,8 @@ export default function Users() {
 }
 
 function orderRoles(values: RoleOption[]) {
-  const byValue = new Map(values.map((role) => [role.value, role]));
-  return ROLE_ORDER.map((value) => byValue.get(value) ?? { value, description: "", permissions: [] });
+  const rank = new Map(ROLE_ORDER.map((value, index) => [value, index]));
+  return [...values].sort((a, b) => (rank.get(a.value) ?? 999) - (rank.get(b.value) ?? 999));
 }
 
 const pageHeader: React.CSSProperties = { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 16 };

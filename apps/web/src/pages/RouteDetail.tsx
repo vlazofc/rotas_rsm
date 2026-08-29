@@ -2,10 +2,25 @@ import { Fragment, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
 import api from "../services/api";
+import {appConfirm} from "../components/AppDialog";
+import { applyTimemark } from "../services/timemark";
 import { useAuth } from "../context/AuthContext";
 import { usePolling } from "../hooks/usePolling";
 
 const REFRESH_INTERVAL_MS = 20000;
+
+// Best-effort: usada para preencher a última posição conhecida do veículo
+// (route_events/checkins), consumida pela busca de prestadores por raio de km.
+function getCurrentPosition(): Promise<{ latitude: number; longitude: number } | null> {
+  return new Promise((resolve) => {
+    if (!("geolocation" in navigator)) { resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 60000 },
+    );
+  });
+}
 
 interface StopOperation {
   id: number; fieldeas_code?: string | null; order_id?: string | null;
@@ -41,18 +56,11 @@ interface RouteData {
   source?: string; fieldeas_description?: string | null; fieldeas_sync_at?: string | null;
   vehicle_requested?: string | null; vehicle_sent?: string | null;
   helper_assigned?: boolean | null; tracked?: boolean | null;
+  driver_payment_amount?: number | null; driver_payment_notes?: string | null;
 }
-interface Driver { id: number; name: string; }
+interface Driver { id: number; name: string; employment_type?: "proprio" | "agregado"; daily_rate?: number | null; }
 interface Vehicle { id: number; plate: string; vehicle_type_code?: string | null; vehicle_type_label?: string | null; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
-interface ManifestSuggestions {
-  codigo_ut: string[];
-  origins: string[];
-  addresses: string[];
-  customers: string[];
-  cities: string[];
-  orders: string[];
-}
 
 const STATUS_COLOR: Record<string, string> = {
   planejada: "#64748b", em_carregamento: "#0ea5e9", liberada: "#a855f7",
@@ -62,15 +70,7 @@ const STOP_COLOR: Record<string, string> = {
   pendente: "#64748b", em_rota: "#0ea5e9", entregue: "#16a34a", falha: "#ef4444", devolvido: "#f59e0b",
 };
 
-const EMPTY_STOP = { customer_name: "", customer_address: "", city: "", planned_date: "", planned_time: "", weight_kg: "", pallets: "", order_number: "" };
-const emptySuggestions: ManifestSuggestions = {
-  codigo_ut: [],
-  origins: [],
-  addresses: [],
-  customers: [],
-  cities: [],
-  orders: [],
-};
+const EMPTY_STOP = { customer_name: "", customer_address: "", city: "", planned_date: "", planned_time: "", stop_type:"" as ""|"carga"|"descarga", weight_kg: "", pallets: "", order_number: "" };
 
 export default function RouteDetail() {
   const { t, i18n } = useTranslation();
@@ -105,10 +105,9 @@ export default function RouteDetail() {
     justification: "",
   });
   const [editHeader, setEditHeader] = useState(false);
-  const [header, setHeader] = useState({ origin_name: "", origin_address: "", route_date: "", driver_id: "", vehicle_id: "", status: "", status_justification: "", vehicle_requested: "", vehicle_sent: "", helper_assigned: false, tracked: false });
+  const [header, setHeader] = useState({ origin_name: "", origin_address: "", route_date: "", driver_id: "", vehicle_id: "", status: "", status_justification: "", vehicle_requested: "", vehicle_sent: "", helper_assigned: false, tracked: false, driver_payment_amount: "", driver_payment_notes: "" });
   const [editingStop, setEditingStop] = useState<"new" | number | null>(null);
   const [stopForm, setStopForm] = useState({ ...EMPTY_STOP });
-  const [suggestions, setSuggestions] = useState<ManifestSuggestions>(emptySuggestions);
   const [error, setError] = useState("");
   const [modalError, setModalError] = useState("");
   const [tollOpen, setTollOpen] = useState(false);
@@ -135,7 +134,6 @@ export default function RouteDetail() {
     api.get("/drivers").then((r) => setDrivers(r.data)).catch(() => {});
     api.get("/vehicles").then((r) => setVehicles(r.data)).catch(() => {});
     api.get("/failure-reasons").then((r) => setReasons(r.data)).catch(() => {});
-    api.get<ManifestSuggestions>("/manifests/suggestions").then((r) => setSuggestions(r.data)).catch(() => setSuggestions(emptySuggestions));
   }, [id]);
 
   // Mantém os dados da rota e das paradas atualizados sem exigir F5,
@@ -163,6 +161,8 @@ export default function RouteDetail() {
       vehicle_id: route!.vehicle_id ? String(route!.vehicle_id) : "", status: route!.status, status_justification: "",
       vehicle_requested: route!.vehicle_requested ?? "", vehicle_sent: route!.vehicle_sent ?? "",
       helper_assigned: route!.helper_assigned ?? false, tracked: route!.tracked ?? false,
+      driver_payment_amount: route!.driver_payment_amount != null ? String(route!.driver_payment_amount) : "",
+      driver_payment_notes: route!.driver_payment_notes ?? "",
     });
     setEditHeader(true);
   }
@@ -178,6 +178,8 @@ export default function RouteDetail() {
         vehicle_sent: header.vehicle_sent || null,
         helper_assigned: header.helper_assigned,
         tracked: header.tracked,
+        driver_payment_amount: drivers.find((driver) => String(driver.id) === header.driver_id)?.employment_type === "agregado" && header.driver_payment_amount ? Number(header.driver_payment_amount) : null,
+        driver_payment_notes: drivers.find((driver) => String(driver.id) === header.driver_id)?.employment_type === "agregado" ? header.driver_payment_notes || null : null,
       });
       if (isAdmin && header.status && header.status !== route!.status) {
         if (header.status_justification.trim().length < 3) {
@@ -226,7 +228,7 @@ export default function RouteDetail() {
     setEditKm(true);
   }
   async function excludeRoute() {
-    if (!window.confirm(t("rd.exclude_confirm", { code: route!.codigo_ut }))) return;
+    if (!await appConfirm(t("rd.exclude_confirm", { code: route!.codigo_ut }),{title:"Excluir rota",confirmLabel:"Sim, excluir",danger:true})) return;
     setError("");
     try { await api.delete(`/routes/${id}/exclude`); navigate("/routes"); }
     catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
@@ -248,6 +250,7 @@ export default function RouteDetail() {
     setStopForm({
       customer_name: s.customer_name, customer_address: s.customer_address ?? "", city: s.city ?? "",
       planned_date: s.planned_date ?? "", planned_time: (s.planned_time ?? "").slice(0, 5),
+      stop_type:(s.stop_type??"") as ""|"carga"|"descarga",
       weight_kg: s.weight_kg != null ? String(s.weight_kg) : "", pallets: s.pallets != null ? String(s.pallets) : "",
       order_number: s.order_number ?? "",
     });
@@ -259,6 +262,7 @@ export default function RouteDetail() {
       customer_name: stopForm.customer_name, customer_address: stopForm.customer_address || null,
       city: stopForm.city || null, planned_date: stopForm.planned_date || null,
       planned_time: stopForm.planned_time || null,
+      stop_type:stopForm.stop_type||null,
       weight_kg: stopForm.weight_kg ? Number(stopForm.weight_kg) : null,
       pallets: stopForm.pallets ? Number(stopForm.pallets) : null,
       order_number: stopForm.order_number || null,
@@ -276,13 +280,16 @@ export default function RouteDetail() {
     finally { setOptimizing(false); }
   }
   async function deleteStop(s: Stop) {
-    if (!window.confirm(t("rd.confirm_delete", { name: s.customer_name }) ?? "")) return;
+    if (!await appConfirm(t("rd.confirm_delete", { name: s.customer_name }) ?? "",{title:"Excluir parada",confirmLabel:"Sim, excluir",danger:true})) return;
     try { await api.delete(`/routes/${id}/stops/${s.id}`); reload(); }
     catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.save_error")); }
   }
   async function checkin(s: Stop) {
-    try { await api.post(`/routes/${id}/stops/${s.id}/checkin`, {}); reload(); }
-    catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
+    try {
+      const pos = await getCurrentPosition();
+      await api.post(`/routes/${id}/stops/${s.id}/checkin`, pos ?? {});
+      reload();
+    } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
   function openProof(s: Stop) {
     if (s.stop_type === "carga") {
@@ -292,8 +299,11 @@ export default function RouteDetail() {
     setError(""); setProofError(""); setProofFile(null); setProofStop(s);
   }
   async function deliverLoaded(s: Stop) {
-    try { await api.post(`/routes/${id}/stops/${s.id}/deliver`, { success: true }); reload(); }
-    catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
+    try {
+      const pos = await getCurrentPosition();
+      await api.post(`/routes/${id}/stops/${s.id}/deliver`, { success: true, ...(pos ?? {}) });
+      reload();
+    } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
   async function confirmDeliveryProof(e: React.FormEvent) {
     e.preventDefault();
@@ -304,6 +314,8 @@ export default function RouteDetail() {
     payload.set("proof", proofFile);
     setProofSaving(true);
     try {
+      const pos = await getCurrentPosition();
+      if (pos) { payload.set("latitude", String(pos.latitude)); payload.set("longitude", String(pos.longitude)); }
       await api.post(`/routes/${id}/stops/${proofStop!.id}/deliver-with-proof`, payload);
       setProofStop(null); setProofFile(null); reload();
     } catch (err: any) { setProofError(formatApiError(err?.response?.data?.detail) ?? t("rd.action_error")); }
@@ -328,6 +340,8 @@ export default function RouteDetail() {
     if (failForm.returned_quantity) payload.set("returned_quantity", failForm.returned_quantity);
     if (failForm.notes.trim()) payload.set("notes", failForm.notes.trim());
     try {
+      const pos = await getCurrentPosition();
+      if (pos) { payload.set("latitude", String(pos.latitude)); payload.set("longitude", String(pos.longitude)); }
       await api.post(`/routes/${id}/stops/${failStop!.id}/deliver-with-proof`, payload);
       setFailStop(null); setFailFile(null); reload();
     } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
@@ -475,6 +489,7 @@ export default function RouteDetail() {
             <Info label={t("route.origin")} value={route.origin_name ?? "—"} />
             <Info label={t("rd.address")} value={route.origin_address ?? "—"} />
             <Info label={t("route.driver")} value={driverName(route.driver_id)} />
+            <Info label="Pagamento do motorista" value={drivers.find((d) => d.id === route.driver_id)?.employment_type === "agregado" ? (route.driver_payment_amount != null ? formatCurrency(Number(route.driver_payment_amount), i18n.language) : "Negociação pendente") : "Diária do cadastro"} />
             <Info label={t("route.vehicle")} value={vehiclePlate(route.vehicle_id)} />
             <Info label={t("rd.salvesen_pallets")} value={formatQty(salvesenPalletsTotal)} />
             {(route.vehicle_requested || route.vehicle_sent) && (
@@ -504,15 +519,15 @@ export default function RouteDetail() {
             )}
           </div>
         ) : (
-          <form onSubmit={saveHeader}>
+          <div className="modal-backdrop" onClick={() => setEditHeader(false)}>
+          <form className="modal-card driver-modal" onSubmit={saveHeader} onClick={(event) => event.stopPropagation()}>
+            <h3>{t("rd.route_info")}</h3>
             <div style={infoGrid}>
               <Field label={t("route.date")}><input type="date" style={input} value={header.route_date}
                 onChange={(e) => setHeader({ ...header, route_date: e.target.value })} /></Field>
               <Field label={t("route.origin")}><input style={input} value={header.origin_name}
-                list="detail-origin-suggestions"
                 onChange={(e) => setHeader({ ...header, origin_name: e.target.value })} /></Field>
               <Field label={t("rd.address")}><input style={input} value={header.origin_address}
-                list="detail-address-suggestions"
                 onChange={(e) => setHeader({ ...header, origin_address: e.target.value })} /></Field>
               <Field label={t("route.driver")}>
                 <select style={input} value={header.driver_id} onChange={(e) => setHeader({ ...header, driver_id: e.target.value })}>
@@ -520,6 +535,10 @@ export default function RouteDetail() {
                   {drivers.map((dr) => <option key={dr.id} value={dr.id}>{dr.name}</option>)}
                 </select>
               </Field>
+              {drivers.find((driver) => String(driver.id) === header.driver_id)?.employment_type === "agregado" && <>
+                <Field label="Valor negociado da rota"><input required type="number" min="0.01" step="0.01" style={input} value={header.driver_payment_amount} onChange={(e) => setHeader({ ...header, driver_payment_amount: e.target.value })}/></Field>
+                <Field label="Observação da negociação"><input style={input} value={header.driver_payment_notes} onChange={(e) => setHeader({ ...header, driver_payment_notes: e.target.value })}/></Field>
+              </>}
               <Field label={t("route.vehicle")}>
                 <select style={input} value={header.vehicle_id} onChange={(e) => {
                   const vehicleId = e.target.value;
@@ -560,13 +579,12 @@ export default function RouteDetail() {
                 </>
               )}
             </div>
-            <SuggestionList id="detail-origin-suggestions" values={suggestions.origins} />
-            <SuggestionList id="detail-address-suggestions" values={suggestions.addresses} />
             <div style={{ marginTop: 12 }}>
               <button type="submit" style={primary}>{t("common.save")}</button>
               <button type="button" style={ghost} onClick={() => setEditHeader(false)}>{t("common.cancel")}</button>
             </div>
           </form>
+          </div>
         )}
       </div>
 
@@ -661,7 +679,9 @@ export default function RouteDetail() {
             <Info label={t("rd.km_return")} value={route.km_return_informed != null ? String(route.km_return_informed) : "—"} />
           </div>
         ) : (
-          <form onSubmit={saveKm}>
+          <div className="modal-backdrop" onClick={() => setEditKm(false)}>
+          <form className="modal-card" onSubmit={saveKm} onClick={(event) => event.stopPropagation()}>
+            <h3>{t("rd.km_title")}</h3>
             <div style={infoGrid}>
               <Field label={t("rd.km_outbound")}>
                 <input type="number" step="any" min="0" style={input} value={kmForm.km_outbound_informed}
@@ -677,6 +697,7 @@ export default function RouteDetail() {
               <button type="button" style={ghost} onClick={() => setEditKm(false)}>{t("common.cancel")}</button>
             </div>
           </form>
+          </div>
         )}
       </div>
 
@@ -705,39 +726,34 @@ export default function RouteDetail() {
         )}
 
         {editingStop !== null && (
-          <form onSubmit={saveStop} style={{ ...panel, marginBottom: 12 }}>
+          <div className="modal-backdrop" onClick={() => setEditingStop(null)}>
+          <form className="modal-card driver-modal" onSubmit={saveStop} onClick={(event) => event.stopPropagation()}>
             <h4 style={{ marginTop: 0 }}>{editingStop === "new" ? t("rd.add_stop") : t("rd.edit_stop")}</h4>
             <div style={infoGrid}>
               <Field label={t("rd.customer")}><input style={input} required value={stopForm.customer_name}
-                list="stop-customer-suggestions"
                 onChange={(e) => setStopForm({ ...stopForm, customer_name: e.target.value })} /></Field>
               <Field label={t("rd.address")}><input style={input} value={stopForm.customer_address}
-                list="stop-address-suggestions"
                 onChange={(e) => setStopForm({ ...stopForm, customer_address: e.target.value })} /></Field>
               <Field label={t("rd.city")}><input style={input} value={stopForm.city}
-                list="stop-city-suggestions"
                 onChange={(e) => setStopForm({ ...stopForm, city: e.target.value })} /></Field>
               <Field label={t("route.deadline_date")}><input type="date" style={input} value={stopForm.planned_date}
                 onChange={(e) => setStopForm({ ...stopForm, planned_date: e.target.value })} /></Field>
               <Field label={t("route.deadline_time")}><input type="time" style={input} value={stopForm.planned_time}
                 onChange={(e) => setStopForm({ ...stopForm, planned_time: e.target.value })} /></Field>
+              <Field label="Tipo de parada"><select style={input} required value={stopForm.stop_type} onChange={e=>setStopForm({...stopForm,stop_type:e.target.value as ""|"carga"|"descarga"})}><option value="">Selecione</option><option value="carga">Carga</option><option value="descarga">Descarga</option></select></Field>
               <Field label={t("route.weight")}><input type="number" step="any" style={input} value={stopForm.weight_kg}
                 onChange={(e) => setStopForm({ ...stopForm, weight_kg: e.target.value })} /></Field>
               <Field label={t("route.pallets")}><input type="number" step="any" style={input} value={stopForm.pallets}
                 onChange={(e) => setStopForm({ ...stopForm, pallets: e.target.value })} /></Field>
               <Field label={t("route.order")}><input style={input} value={stopForm.order_number}
-                list="stop-order-suggestions"
                 onChange={(e) => setStopForm({ ...stopForm, order_number: e.target.value })} /></Field>
             </div>
-            <SuggestionList id="stop-customer-suggestions" values={suggestions.customers} />
-            <SuggestionList id="stop-address-suggestions" values={suggestions.addresses} />
-            <SuggestionList id="stop-city-suggestions" values={suggestions.cities} />
-            <SuggestionList id="stop-order-suggestions" values={suggestions.orders} />
             <div style={{ marginTop: 12 }}>
               <button type="submit" style={primary}>{t("common.save")}</button>
               <button type="button" style={ghost} onClick={() => setEditingStop(null)}>{t("common.cancel")}</button>
             </div>
           </form>
+          </div>
         )}
 
         <table style={table}>
@@ -995,7 +1011,7 @@ export default function RouteDetail() {
                 accept="image/*,application/pdf"
                 capture="environment"
                 required
-                onChange={(e) => setProofFile(e.target.files?.[0] ?? null)}
+                onChange={async (e) => setProofFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0]) : null)}
               />
             </Field>
             <div style={{ marginTop: 12 }}>
@@ -1046,7 +1062,7 @@ export default function RouteDetail() {
                 accept="image/*,application/pdf"
                 capture="environment"
                 required
-                onChange={(e) => setFailFile(e.target.files?.[0] ?? null)}
+                onChange={async (e) => setFailFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0]) : null)}
               />
             </Field>
             <Field label={t("rd.notes")}>
@@ -1074,7 +1090,7 @@ export default function RouteDetail() {
                 accept="image/*,application/pdf"
                 capture="environment"
                 required
-                onChange={(e) => setWarehouseFile(e.target.files?.[0] ?? null)}
+                onChange={async (e) => setWarehouseFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0]) : null)}
               />
             </Field>
             <div style={{ marginTop: 12 }}>
@@ -1117,13 +1133,6 @@ function Info({ label, value }: { label: string; value: string }) {
 }
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return <label style={field}><span>{label}</span>{children}</label>;
-}
-function SuggestionList({ id, values }: { id: string; values: string[] }) {
-  return (
-    <datalist id={id}>
-      {values.map((value) => <option key={`${id}-${value}`} value={value} />)}
-    </datalist>
-  );
 }
 function fmt(s?: string | null) {
   if (!s) return "—";

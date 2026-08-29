@@ -41,7 +41,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     ports:
-      - "8089:80"            # http://localhost:8089
+      - "127.0.0.1:8089:80"  # acesso local; entrada pública somente pelo tunnel
     depends_on:
       - web
       - api
@@ -76,11 +76,15 @@ services:
     command: >
       gunicorn app.main:app
       -k uvicorn.workers.UvicornWorker
-      --workers 4
+      --workers ${API_WORKERS:-4}
       --bind 0.0.0.0:8000
+      --keep-alive 10
       --timeout 120
+      --graceful-timeout 30
+      --max-requests 5000
+      --max-requests-jitter 500
     ports:
-      - "8001:8000"          # http://localhost:8001/docs
+      - "127.0.0.1:8001:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,23 +110,6 @@ services:
     depends_on:
       - postgres
       - redis
-    networks:
-      - internal
-
-  # --- Worker OCR (EasyOCR + Tesseract) ---
-  ocr-worker:
-    build:
-      context: ./apps/ocr-worker
-      dockerfile: Dockerfile
-    container_name: rotas_ocr_worker
-    restart: unless-stopped
-    env_file:
-      - .env
-    command: celery -A worker.celery_app worker --loglevel=info --concurrency=1 -Q ocr
-    depends_on:
-      - postgres
-      - redis
-      - minio
     networks:
       - internal
 
@@ -157,7 +144,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5434:5432"          # porta local 5434 (evita conflito com PostgreSQL local/outros projetos)
+      - "127.0.0.1:5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -175,7 +162,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     networks:
       - internal
 
@@ -191,8 +178,8 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9002:9000"
-      - "9003:9001"          # console MinIO http://localhost:9003
+      - "127.0.0.1:9002:9000"
+      - "127.0.0.1:9003:9001"
     networks:
       - internal
 
@@ -212,49 +199,6 @@ services:
     networks:
       - internal
 
-  # --- Aprendizado automático: exporta conferências -> base de conhecimento + dataset ---
-  # Roda sozinho 1x/dia. A base cresce a cada conferência salva pelos operadores.
-  training-export:
-    build:
-      context: ./apps/ocr-worker
-      dockerfile: Dockerfile
-    container_name: rotas_training_export
-    restart: unless-stopped
-    env_file:
-      - .env
-    working_dir: /app/knowledge_base_legacy_pt/training
-    # Persiste os exemplos/dataset no repositório (host), versionável no Git.
-    # Base herdada do piloto Portugal/Salvesen — substituir por exemplos Brasil.
-    volumes:
-      - ./apps/ocr-worker/knowledge_base_legacy_pt:/app/knowledge_base_legacy_pt
-    entrypoint: ["sh", "-c", "while true; do python export_training_data.py || true; sleep 86400; done"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - internal
-
-  # --- Ollama (IA local p/ extração estruturada) — opcional ---
-  # Ative com:  docker compose --profile llm up -d
-  # Requer EXTRACTOR=llm e OCR_LLM_BASE_URL=http://ollama:11434/v1 no .env
-  ollama:
-    image: ollama/ollama:latest
-    container_name: rotas_ollama
-    restart: unless-stopped
-    profiles: ["llm"]
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - internal
-    # Para GPU NVIDIA, descomente (precisa nvidia-container-toolkit):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-
 networks:
   internal:
     driver: bridge
@@ -272,5 +216,3 @@ volumes:
     name: admmendes_caddy_data
   caddy_config:
     name: admmendes_caddy_config
-  ollama_data:
-    name: admmendes_ollama_data

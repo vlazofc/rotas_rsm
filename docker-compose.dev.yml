@@ -16,6 +16,9 @@ services:
 
   api:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      APP_ENV: development
+      ALLOWED_ORIGINS: http://localhost:5173,http://localhost:8088
     volumes:
       - ./apps/api:/app
     ports:

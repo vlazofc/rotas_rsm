@@ -12,6 +12,7 @@ class StopIn(BaseModel):
     planned_date: date | None = None
     planned_time: time | None = None
     temperature: str | None = None
+    stop_type: Literal["carga", "descarga"] | None = None
     weight_kg: float | None = None
     pallets: float | None = None
     order_number: str | None = None
@@ -48,7 +49,6 @@ class StopOut(StopIn):
     warehouse_return_url: str | None = None
     # Campos Fieldeas
     fieldeas_internal_code: str | None = None
-    stop_type: str | None = None
     postal_code: str | None = None
     province: str | None = None
     operations: list[StopOperationOut] = Field(default_factory=list)
@@ -79,6 +79,7 @@ class StopUpdate(BaseModel):
     planned_date: date | None = None
     planned_time: time | None = None
     temperature: str | None = None
+    stop_type: Literal["carga", "descarga"] | None = None
     weight_kg: float | None = None
     pallets: float | None = None
     order_number: str | None = None
@@ -104,6 +105,8 @@ class RouteIn(BaseModel):
     origin_address: str | None = None
     driver_id: int | None = None
     vehicle_id: int | None = None
+    driver_payment_amount: float | None = None
+    driver_payment_notes: str | None = None
     planned_departure_at: datetime | None = None
     toll_outbound: float | None = None
     toll_return: float | None = None
@@ -124,6 +127,8 @@ class RouteUpdate(BaseModel):
     origin_address: str | None = None
     driver_id: int | None = None
     vehicle_id: int | None = None
+    driver_payment_amount: float | None = None
+    driver_payment_notes: str | None = None
     planned_departure_at: datetime | None = None
     toll_outbound: float | None = None
     toll_return: float | None = None
@@ -197,6 +202,8 @@ class RouteOut(BaseModel):
     origin_address: str | None
     driver_id: int | None
     vehicle_id: int | None
+    driver_payment_amount: float | None = None
+    driver_payment_notes: str | None = None
     status: str
     planned_departure_at: datetime | None
     actual_departure_at: datetime | None

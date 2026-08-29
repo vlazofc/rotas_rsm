@@ -12,6 +12,7 @@ from app.db.models import Branch, RoleProfile, User
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
+from app.services.entity_status import StatusChangeIn, apply_status
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -24,6 +25,9 @@ class UserIn(BaseModel):
     role: str = Role.MOTORISTA.value
     branch_id: int | None = None
     password: str | None = Field(default=None, min_length=8, max_length=72)
+    department: str | None = Field(default=None, max_length=80)
+    subgroup: str | None = Field(default=None, max_length=80)
+    permissions: list[str] = Field(default_factory=list)
 
 
 class UserUpdate(BaseModel):
@@ -31,6 +35,9 @@ class UserUpdate(BaseModel):
     role: str | None = None
     branch_id: int | None = None
     active: bool | None = None
+    department: str | None = Field(default=None, max_length=80)
+    subgroup: str | None = Field(default=None, max_length=80)
+    permissions: list[str] | None = None
 
 
 class ResetPasswordIn(BaseModel):
@@ -72,9 +79,23 @@ class UserOut(BaseModel):
     branch_id: int | None
     tenant_id: int | None = None
     active: bool
+    blocked: bool = False
+    status_reason: str | None = None
+    department: str | None = None
+    subgroup: str | None = None
+    permissions: list[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
+
+
+def _user_out(user: User) -> UserOut:
+    return UserOut(
+        id=user.id, email=user.email, name=user.name, role=user.role,
+        branch_id=user.branch_id, tenant_id=user.tenant_id, active=user.active, blocked=user.blocked, status_reason=user.status_reason,
+        department=user.department, subgroup=user.subgroup,
+        permissions=_parse_permissions(user.permissions_json),
+    )
 
 
 def _validate_role_value(value: str) -> None:
@@ -226,7 +247,7 @@ def list_users(db: Session = Depends(get_db), actor: User = Depends(get_current_
     ).order_by(User.name)
     if actor.role != Role.ADMIN_GLOBAL.value:
         stmt = stmt.where(User.tenant_id == actor.tenant_id)
-    return db.scalars(stmt).all()
+    return [_user_out(row) for row in db.scalars(stmt).all()]
 
 
 @router.post("", response_model=UserOut, dependencies=[Depends(_ADMIN_OR_MANAGER)])
@@ -248,13 +269,15 @@ def create_user(data: UserIn, db: Session = Depends(get_db), actor: User = Depen
         tenant_id=branch.tenant_id,
         branch_id=branch.id,
         hashed_password=hash_password(data.password) if data.password else None,
+        department=data.department, subgroup=data.subgroup,
+        permissions_json=_permissions_text(data.permissions),
     )
     db.add(user)
     db.flush()
     log(db, user_id=actor.id, action="create", entity="user", entity_id=user.id)
     db.commit()
     db.refresh(user)
-    return user
+    return _user_out(user)
 
 
 @router.put("/{user_id}", response_model=UserOut, dependencies=[Depends(_ADMIN_OR_MANAGER)])
@@ -265,6 +288,8 @@ def update_user(user_id: int, data: UserUpdate,
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
     require_same_tenant(actor, user.tenant_id)
     updates = data.model_dump(exclude_unset=True)
+    if "active" in updates:
+        raise HTTPException(422, "Use a ação de situação para ativar ou desativar o usuário.")
     before = snapshot(user, list(updates))
     if data.role is not None:
         _ensure_role_exists(db, data.role)
@@ -274,6 +299,12 @@ def update_user(user_id: int, data: UserUpdate,
         user.role = data.role
     if data.name is not None:
         user.name = data.name
+    if "department" in updates:
+        user.department = data.department
+    if "subgroup" in updates:
+        user.subgroup = data.subgroup
+    if data.permissions is not None:
+        user.permissions_json = _permissions_text(data.permissions)
     if data.branch_id is not None:
         # Não-admin global não pode mover usuários para outra filial.
         branch = require_branch_access(db, actor, data.branch_id)
@@ -286,7 +317,17 @@ def update_user(user_id: int, data: UserUpdate,
     log_update(db, user_id=actor.id, entity="user", entity_id=user.id, before=before, obj=user, updates=updates)
     db.commit()
     db.refresh(user)
-    return user
+    return _user_out(user)
+
+
+@router.post("/{user_id}/status", response_model=UserOut, dependencies=[Depends(_ADMIN_OR_MANAGER)])
+def change_user_status(user_id:int,data:StatusChangeIn,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
+    user=db.get(User,user_id)
+    if user is None:raise HTTPException(404,"Usuário não encontrado.")
+    require_same_tenant(actor,user.tenant_id)
+    if user.id==actor.id and data.action in {"deactivate","block"}:raise HTTPException(400,"Não é possível bloquear ou desativar a própria conta.")
+    if user.role==Role.ADMIN_GLOBAL.value and actor.role!=Role.ADMIN_GLOBAL.value:raise HTTPException(403,"Sem permissão para alterar um admin global.")
+    apply_status(db,obj=user,data=data,user_id=actor.id,entity="user");user.auth_version += 1;db.commit();db.refresh(user);return _user_out(user)
 
 
 @router.post("/{user_id}/reset-password", response_model=UserOut,
@@ -300,7 +341,8 @@ def reset_password(user_id: int, data: ResetPasswordIn,
     if user.role == Role.ADMIN_GLOBAL.value and actor.role != Role.ADMIN_GLOBAL.value:
         raise HTTPException(status_code=403, detail="Sem permissão para redefinir a senha de um admin global.")
     user.hashed_password = hash_password(data.new_password)
+    user.auth_version += 1
     log(db, user_id=actor.id, action="reset_password", entity="user", entity_id=user.id)
     db.commit()
     db.refresh(user)
-    return user
+    return _user_out(user)

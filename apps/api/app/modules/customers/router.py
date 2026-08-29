@@ -1,4 +1,5 @@
 """Clientes finais atendidos por cada empresa da plataforma."""
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
@@ -17,19 +18,61 @@ _MANAGER = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)
 
 class CustomerIn(BaseModel):
     name: str = Field(min_length=2, max_length=160)
+    customer_type: str = "PJ"
+    trade_name: str | None = None
     document: str | None = Field(default=None, max_length=40)
+    state_registration: str | None = None
+    municipal_registration: str | None = None
+    identity_document: str | None = None
+    birth_date: date | None = None
+    main_activity: str | None = None
+    contact_name: str | None = None
+    financial_contact: str | None = None
+    financial_phone: str | None = None
     email: EmailStr | None = None
     phone: str | None = Field(default=None, max_length=40)
+    postal_code: str | None = None
     address: str | None = Field(default=None, max_length=255)
+    address_number: str | None = None
+    complement: str | None = None
+    district: str | None = None
+    city: str | None = None
+    state: str | None = None
+    credit_limit: float | None = Field(default=None, ge=0)
+    payment_term_days: int | None = Field(default=None, ge=0)
+    bank_reference: str | None = None
+    commercial_reference: str | None = None
+    notes: str | None = None
     tenant_id: int | None = None
 
 
 class CustomerUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=160)
+    customer_type: str | None = None
+    trade_name: str | None = None
     document: str | None = Field(default=None, max_length=40)
+    state_registration: str | None = None
+    municipal_registration: str | None = None
+    identity_document: str | None = None
+    birth_date: date | None = None
+    main_activity: str | None = None
+    contact_name: str | None = None
+    financial_contact: str | None = None
+    financial_phone: str | None = None
     email: EmailStr | None = None
     phone: str | None = Field(default=None, max_length=40)
+    postal_code: str | None = None
     address: str | None = Field(default=None, max_length=255)
+    address_number: str | None = None
+    complement: str | None = None
+    district: str | None = None
+    city: str | None = None
+    state: str | None = None
+    credit_limit: float | None = Field(default=None, ge=0)
+    payment_term_days: int | None = Field(default=None, ge=0)
+    bank_reference: str | None = None
+    commercial_reference: str | None = None
+    notes: str | None = None
     active: bool | None = None
 
 
@@ -37,17 +80,24 @@ class CustomerOut(BaseModel):
     id: int
     tenant_id: int
     name: str
+    customer_type: str
+    trade_name: str | None
     document: str | None
+    state_registration: str | None; municipal_registration: str | None; identity_document: str | None; birth_date: date | None; main_activity: str | None
+    contact_name: str | None; financial_contact: str | None; financial_phone: str | None
     email: EmailStr | None
     phone: str | None
+    postal_code: str | None
     address: str | None
+    address_number: str | None; complement: str | None; district: str | None; city: str | None; state: str | None
+    credit_limit: float | None; payment_term_days: int | None; bank_reference: str | None; commercial_reference: str | None; notes: str | None
     active: bool
 
     class Config:
         from_attributes = True
 
 
-@router.get("", response_model=list[CustomerOut])
+@router.get("", response_model=list[CustomerOut], dependencies=[Depends(_MANAGER)])
 def list_customers(
     only_active: bool = False,
     tenant_id: int | None = None,
@@ -67,6 +117,7 @@ def list_customers(
 
 @router.post("", response_model=CustomerOut, dependencies=[Depends(_MANAGER)])
 def create_customer(data: CustomerIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    if data.customer_type not in {"PF", "PJ"}: raise HTTPException(422, "Tipo de cliente inválido.")
     tenant_id = data.tenant_id if actor.role == Role.ADMIN_GLOBAL.value else actor.tenant_id
     if tenant_id is None:
         raise HTTPException(status_code=422, detail="Selecione a empresa do cliente.")
@@ -95,6 +146,7 @@ def update_customer(
         raise HTTPException(status_code=404, detail="Cliente não encontrado.")
     require_same_tenant(actor, customer.tenant_id)
     updates = data.model_dump(exclude_unset=True)
+    if updates.get("customer_type") not in {None, "PF", "PJ"}: raise HTTPException(422, "Tipo de cliente inválido.")
     before = snapshot(customer, list(updates))
     for field, value in updates.items():
         setattr(customer, field, value)

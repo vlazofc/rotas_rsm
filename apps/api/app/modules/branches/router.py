@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import Role, require_roles, require_same_tenant
-from app.db.models import Branch, Driver, Manifest, Route, User, Vehicle
+from app.db.models import Branch, Driver, Route, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
@@ -83,7 +83,6 @@ def delete_branch(branch_id: int, db: Session = Depends(get_db), actor: User = D
         ("motoristas", Driver, Driver.branch_id),
         ("veículos", Vehicle, Vehicle.branch_id),
         ("rotas", Route, Route.branch_id),
-        ("manifestos", Manifest, Manifest.branch_id),
     ]
     for label, model, column in linked:
         if db.scalar(select(model).where(column == branch_id)):

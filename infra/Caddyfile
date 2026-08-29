@@ -3,24 +3,31 @@
 
 :80 {
 	encode gzip zstd
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(self), geolocation=(self), microphone=()"
+	}
+
+	@auth path /api/auth/*
+	header @auth Cache-Control "no-store"
 
 	handle /api/* {
-		reverse_proxy api:8000
-	}
-	handle /docs* {
-		reverse_proxy api:8000
-	}
-	handle /openapi.json {
-		reverse_proxy api:8000
+		reverse_proxy api:8000 {
+			transport http {
+				keepalive 30s
+				keepalive_idle_conns 100
+				keepalive_idle_conns_per_host 100
+			}
+		}
 	}
 	handle /health {
 		reverse_proxy api:8000
 	}
 
 	handle /comprovantes/* {
-		reverse_proxy minio:9000
-	}
-	handle /manifestos/* {
 		reverse_proxy minio:9000
 	}
 	handle /custom/* {

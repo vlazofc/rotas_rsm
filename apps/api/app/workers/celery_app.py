@@ -1,4 +1,4 @@
-"""Aplicação Celery (notificações, cálculos, disparo de OCR, sync SharePoint)."""
+"""Aplicação Celery (notificações, cálculos e sincronização SharePoint)."""
 from celery import Celery
 from celery.schedules import crontab
 
@@ -17,17 +17,78 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone=settings.app_timezone,
     enable_utc=True,
-    task_routes={
-        # tarefas de OCR são consumidas pelo serviço ocr-worker (fila "ocr")
-        "ocr.process_manifest": {"queue": "ocr"},
-    },
     beat_schedule={
         "sync-torre-controle-sharepoint": {
             "task": "sync.torre_controle",
             "schedule": crontab(minute=0),  # a cada hora; ajuste conforme a operação
         },
+        "research-tax-rules-morning": {
+            "task": "accounting.research_tax_rules",
+            "schedule": crontab(hour=6, minute=0),
+        },
+        "research-tax-rules-night": {
+            "task": "accounting.research_tax_rules",
+            "schedule": crontab(hour=23, minute=59),
+        },
+        "truckcontrol-positions": {
+            "task": "sync.truckcontrol_positions",
+            "schedule": 30.0,
+        },
+        "truckcontrol-vehicles": {
+            "task": "sync.truckcontrol_vehicles",
+            "schedule": 300.0,
+        },
     },
 )
+
+
+def _truckcontrol_sync(kind: str) -> dict:
+    """Executa uma única rotina por vez; o lock expira se o worker cair."""
+    from redis import Redis
+    from sqlalchemy import select
+    from app.db.models import TrackingIntegration
+    from app.db.session import SessionLocal
+    from app.services.truckcontrol import PROVIDER, sync_positions, sync_vehicles
+
+    redis = Redis.from_url(settings.redis_url)
+    lock = redis.lock(f"lock:truckcontrol:{kind}", timeout=25 if kind == "positions" else 240, blocking=False)
+    if not lock.acquire(blocking=False):
+        redis.close()
+        return {"status": "skipped", "reason": "already_running"}
+    db = SessionLocal()
+    try:
+        config = db.scalar(select(TrackingIntegration).where(
+            TrackingIntegration.provider == PROVIDER, TrackingIntegration.enabled.is_(True)))
+        if config is None:
+            return {"status": "skipped", "reason": "not_configured"}
+        result = sync_positions(db, config) if kind == "positions" else sync_vehicles(db, config)
+        return {"status": "success", **result}
+    except Exception as exc:
+        db.rollback()
+        config = locals().get("config")
+        if config is not None:
+            from datetime import datetime, timezone
+            config.last_sync_at, config.last_error = datetime.now(timezone.utc), str(exc)[:500]
+            db.commit()
+        logger.exception("sync.truckcontrol_%s: falha sem exposição de credenciais", kind)
+        return {"status": "error", "error": "provider_sync_failed"}
+    finally:
+        db.close()
+        try:
+            lock.release()
+        except Exception:
+            pass
+        redis.close()
+
+
+@celery_app.task(name="sync.truckcontrol_positions")
+def sync_truckcontrol_positions() -> dict:
+    return _truckcontrol_sync("positions")
+
+
+@celery_app.task(name="sync.truckcontrol_vehicles")
+def sync_truckcontrol_vehicles() -> dict:
+    return _truckcontrol_sync("vehicles")
 
 
 @celery_app.task(name="notifications.send")
@@ -36,9 +97,28 @@ def send_notification(user_id: int, title: str, body: str = "") -> dict:
     return {"user_id": user_id, "title": title, "delivered": True}
 
 
-def enqueue_ocr(manifest_id: int) -> None:
-    """Coloca um manifesto na fila de OCR (consumida pelo ocr-worker)."""
-    celery_app.send_task("ocr.process_manifest", args=[manifest_id], queue="ocr")
+@celery_app.task(name="accounting.research_tax_rules")
+def research_tax_rules_daily() -> dict:
+    """Pesquisa alterações; grava somente propostas inativas para aprovação."""
+    if not settings.groq_api_key:
+        logger.info("accounting.research_tax_rules: GROQ_API_KEY não configurada, pulando.")
+        return {"status": "skipped", "reason": "groq_not_configured"}
+    from sqlalchemy import select
+    from app.db.models import Tenant
+    from app.db.session import SessionLocal
+    from app.services.tax_updates import research_tax_updates, stage_tax_updates
+    db = SessionLocal()
+    try:
+        # Uma única consulta Groq por execução; o mesmo conjunto validado é
+        # distribuído aos tenants sem multiplicar consumo por empresa.
+        candidates = research_tax_updates()
+        results = [stage_tax_updates(db, tenant_id, None, candidates) for tenant_id in db.scalars(select(Tenant.id).where(Tenant.active.is_(True))).all()]
+        return {"status": "success", "candidates": len(candidates), "tenants": results}
+    except Exception as exc:
+        db.rollback(); logger.exception("accounting.research_tax_rules: falha: %s", exc)
+        return {"status": "error", "error": str(exc)}
+    finally:
+        db.close()
 
 
 @celery_app.task(name="sync.torre_controle")

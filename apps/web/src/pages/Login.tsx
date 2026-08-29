@@ -39,8 +39,18 @@ export default function Login() {
     ? { backgroundImage: `url(${branding.background_url})` }
     : {};
 
+  const layout = branding.login_layout || "centered";
+  const intro = branding.login_intro_text || branding.app_subtitle || "Acesse a plataforma para acompanhar sua operação com segurança e agilidade.";
+
   return (
-    <div className={`login-page${branding.background_url ? " has-background" : ""}`} style={pageStyle}>
+    <div className={`login-page login-layout-${layout}${branding.background_url ? " has-background" : ""}`} style={pageStyle}>
+      {layout !== "centered" && <section className="login-presentation">
+        <div className="login-presentation-brand">
+          {branding.logo_url ? <img src={branding.logo_url} alt={branding.app_name ?? t("app.title")} /> : <strong>{branding.app_name || t("app.title")}</strong>}
+        </div>
+        <h1>{branding.app_name || t("app.title")}</h1>
+        <p>{intro}</p>
+      </section>}
       <form onSubmit={onSubmit} className="login-card">
         <div className="login-brand">
           {branding.logo_url ? (
@@ -51,15 +61,19 @@ export default function Login() {
             <h1>{branding.app_name || t("app.title")}</h1>
           )}
         </div>
+        <div className="login-copy">
+          <h2>Faça seu login</h2>
+          {layout === "centered" && <p>{intro}</p>}
+        </div>
         <div className="login-tools">
           <ThemeToggle />
           <LanguageSwitcher />
         </div>
         <label className="login-label">{t("login.email")}</label>
-        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required
+        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="username" required
           className="login-input" />
         <label className="login-label">{t("login.password")}</label>
-        <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required
+        <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" required
           className="login-input" />
         {error && <p className="login-error">{error}</p>}
         <button type="submit" disabled={loading} className="login-submit" style={{ background: accent, color: accentText }}>

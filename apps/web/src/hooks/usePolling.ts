@@ -6,19 +6,34 @@ import { useEffect, useRef } from "react";
  * Pausa automaticamente quando a aba fica em background e re-executa
  * imediatamente ao voltar o foco.
  */
-export function usePolling(callback: () => void, intervalMs: number) {
+export function usePolling(callback: () => void | Promise<void>, intervalMs: number) {
   const callbackRef = useRef(callback);
   callbackRef.current = callback;
 
   useEffect(() => {
-    const tick = () => {
-      if (document.visibilityState === "visible") callbackRef.current();
+    let disposed = false;
+    let timer: number | undefined;
+    let running = false;
+    const schedule = () => {
+      if (disposed) return;
+      const jitter = intervalMs * (0.85 + Math.random() * 0.3);
+      timer = window.setTimeout(tick, jitter);
     };
-    const id = setInterval(tick, intervalMs);
-    const onVisible = () => { if (document.visibilityState === "visible") callbackRef.current(); };
+    const tick = async () => {
+      if (!running && document.visibilityState === "visible") {
+        running = true;
+        try { await callbackRef.current(); } finally { running = false; }
+      }
+      schedule();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !running) void tick();
+    };
+    schedule();
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      clearInterval(id);
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [intervalMs]);

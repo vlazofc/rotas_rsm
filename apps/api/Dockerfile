@@ -19,7 +19,7 @@ COPY . .
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+    CMD curl -fsS http://localhost:8000/ready || exit 1
 
 CMD ["gunicorn", "app.main:app", "-k", "uvicorn.workers.UvicornWorker", \
      "--workers", "4", "--bind", "0.0.0.0:8000", "--timeout", "120"]

@@ -18,7 +18,7 @@
 - A filial deve pertencer ao mesmo tenant do usuário.
 - Auditoria, clientes e fornecedores são filtrados no backend.
 - Rotas validam filial, motorista e veículo antes de persistir.
-- OCR e Financeiro rejeitam chamadas quando desativados no plano.
+- Financeiro e rastreamento rejeitam chamadas quando desativados no plano.
 - Apenas o administrador global atravessa tenants para operar o painel SaaS.
 
 ## GDPR — regras de produto
@@ -29,6 +29,6 @@
 
 Referências: EDPB (veículos conectados/mobilidade) e CNPD (geolocalização laboral).
 
-## Cloudflare Access + Entra ID
-Cloudflare valida identidade **antes** de chegar à VPS; o backend ainda valida
-usuário/perfil/filial/ação e grava auditoria. Defesa em profundidade.
+## Cloudflare Access
+Cloudflare Access pode validar identidade **antes** de chegar à VPS; o backend
+continua validando JWT, usuário, perfil, filial e ação e grava auditoria.

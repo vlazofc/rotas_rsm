@@ -17,6 +17,7 @@ class Role(str, Enum):
     TORRE_CONTROLE = "torre_controle"
     MOTORISTA = "motorista"
     AUDITOR = "auditor"
+    DIRETORIA = "diretoria"
 
 
 ROLE_CONFIG = {
@@ -41,6 +42,12 @@ ROLE_CONFIG = {
             "Visualizar relatórios",
         ],
     },
+    Role.DIRETORIA: {
+        "order": 25,
+        "label": "Diretoria",
+        "description": "Acompanha indicadores e relatórios executivos sem operar lançamentos",
+        "permissions": ["Visualizar relatórios", "Consultar indicadores executivos", "Usar agente executivo"],
+    },
     Role.GESTOR_BRASIL: {
         "order": 30,
         "label": "Gestor Brasil",
@@ -48,7 +55,6 @@ ROLE_CONFIG = {
         "permissions": [
             "Gerenciar usuários da filial",
             "Gerenciar motoristas e veículos",
-            "Conferir manifestos",
             "Gerar rotas",
             "Visualizar relatórios",
         ],
@@ -78,11 +84,10 @@ ROLE_CONFIG = {
     Role.OPERADOR_LOGISTICO: {
         "order": 50,
         "label": "Operador logístico",
-        "description": "Doca, manifesto, liberação de carregamento",
+        "description": "Doca, rotas e liberação de carregamento",
         "permissions": [
             "Criar e atualizar rotas",
             "Registrar tempos de doca",
-            "Enviar e conferir manifestos",
             "Liberar carregamento",
         ],
     },
@@ -98,6 +103,31 @@ ROLE_CONFIG = {
     },
 }
 ROLE_DESCRIPTIONS = {role: cfg["description"] for role, cfg in ROLE_CONFIG.items()}
+
+FINANCE_VIEW = "finance.view"
+FINANCE_EXPENSE_CREATE = "finance.expense.create"
+FINANCE_REVENUE_MANAGE = "finance.revenue.manage"
+FINANCE_ACCOUNTS_MANAGE = "finance.accounts.manage"
+FINANCE_EXPENSE_APPROVE = "finance.expense.approve"
+
+
+def user_permissions(user: User) -> set[str]:
+    """Permissões adicionais concedidas individualmente pelo gestor/admin."""
+    return {item.strip() for item in (user.permissions_json or "").splitlines() if item.strip()}
+
+
+def has_permission(user: User, permission: str, *fallback_roles: Role) -> bool:
+    if user.role == Role.ADMIN_GLOBAL.value:
+        return True
+    return permission in user_permissions(user) or user.role in {role.value for role in fallback_roles}
+
+
+def require_permission(permission: str, *fallback_roles: Role):
+    def _checker(user: User = Depends(get_current_user)) -> User:
+        if not has_permission(user, permission, *fallback_roles):
+            raise HTTPException(status_code=403, detail="Acesso não liberado pelo gestor para este módulo.")
+        return user
+    return _checker
 
 
 def require_roles(*roles: Role):
@@ -118,10 +148,10 @@ def require_roles(*roles: Role):
 
 
 def require_same_branch(user: User, branch_id: int) -> None:
-    """Garante isolamento por filial (exceto admin global)."""
+    """Impede acesso cruzado entre filiais e empresas."""
     if user.role == Role.ADMIN_GLOBAL.value:
         return
-    if user.branch_id != branch_id:
+    if user.branch_id is None or branch_id != user.branch_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acesso restrito à própria filial.",
@@ -137,21 +167,20 @@ def require_same_tenant(user: User, tenant_id: int | None) -> None:
 
 
 def require_branch_access(db: Session, user: User, branch_id: int) -> Branch:
-    """Valida existência, atividade e propriedade da filial antes de gravar dados."""
+    """Resolve a filial e valida empresa e filial do usuário."""
     branch = db.get(Branch, branch_id)
     if branch is None:
         raise HTTPException(status_code=404, detail="Filial não encontrada.")
     if not branch.active:
-        raise HTTPException(status_code=409, detail="Filial inativa.")
+        raise HTTPException(status_code=409, detail="Unidade operacional inativa.")
     require_same_tenant(user, branch.tenant_id)
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id != branch.id:
-        raise HTTPException(status_code=403, detail="Acesso restrito à própria filial.")
+    require_same_branch(user, branch.id)
     return branch
 
 
 def require_feature(feature: str):
     """Dependência para impedir uso de módulos desativados no plano do tenant."""
-    allowed = {"feature_ocr", "feature_sharepoint_sync", "feature_financeiro", "feature_rastreamento"}
+    allowed = {"feature_sharepoint_sync", "feature_financeiro", "feature_rastreamento"}
     if feature not in allowed:
         raise ValueError(f"Feature desconhecida: {feature}")
 
