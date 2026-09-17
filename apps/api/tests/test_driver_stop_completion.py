@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Branch, DeliveryFailureReason, DockSession, Driver, Route, RouteOccurrence, RouteOccurrenceEvent, RouteStop, Tenant, User
+from app.db.models import Attachment, Branch, DeliveryFailureReason, DockSession, Driver, Route, RouteOccurrence, RouteOccurrenceEvent, RouteStop, Tenant, User
 from app.db.session import Base
 from app.modules.routes.router import arrive_cd, deliver, operator_release
 from app.modules.routes.schemas import DeliverIn
@@ -33,6 +33,9 @@ def test_linked_driver_can_deliver_refuse_and_cannot_close_another_route():
             route = Route(tenant_id=tenant.id, branch_id=branch.id, codigo_ut="UT-MOTORISTA", route_date=backlog_date, status="planejada", driver_id=driver.id)
             other_route = Route(tenant_id=tenant.id, branch_id=branch.id, codigo_ut="UT-OUTRO", route_date=backlog_date, status="em_rota", driver_id=other_driver.id)
             db.add_all([route, other_route]); db.flush()
+            loaded_photo = Attachment(bucket="tests", storage_key="loaded.jpg", content_type="image/jpeg")
+            db.add(loaded_photo); db.flush()
+            route.loaded_return_photo_attachment_id = loaded_photo.id
             now = datetime.now(timezone.utc)
             db.add_all([DockSession(route_id=route.id), DockSession(route_id=other_route.id, departure_cd_at=now)])
             delivered_stop = RouteStop(route_id=route.id, sequence=1, customer_name="Cliente entregue", stop_type="carga")

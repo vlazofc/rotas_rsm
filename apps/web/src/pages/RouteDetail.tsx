@@ -416,7 +416,7 @@ export default function RouteDetail() {
   const isStopClosed = (s: Stop) => s.status === "entregue" || s.status === "falha" || s.status === "devolvido";
   const allStopsClosed = route.stops.length > 0 && route.stops.every(isStopClosed);
   const missingWarehouseProofs = route.stops.filter((s) => s.status === "falha" && !s.warehouse_return_attachment_id);
-  const missingClosingPhotos = !route.empty_truck_photo_attachment_id || !route.loaded_return_photo_attachment_id;
+  const missingClosingPhotos = !route.empty_truck_photo_attachment_id;
 
   const d = route.dock_session;
   const dockSteps = [
@@ -574,7 +574,8 @@ export default function RouteDetail() {
           {dockSteps.map((step) => {
             if (step.action === "close" && !allStopsClosed) return null;
             const completed = step.field ? Boolean(d?.[step.field as keyof Dock]) : isClosed;
-            const enabled = !isClosed && !completed && firstPendingDockAction === step.action && step.allowed;
+            const loadedPhotoReady = step.action !== "release" || Boolean(route.loaded_return_photo_attachment_id);
+            const enabled = !isClosed && !completed && firstPendingDockAction === step.action && step.allowed && loadedPhotoReady;
             return (
               <button
                 key={step.action}
@@ -588,6 +589,27 @@ export default function RouteDetail() {
             );
           })}
         </div>
+        {!isClosed && d?.arrival_cd_at && !d?.operator_released_at && (
+          <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+            <p style={{ margin: "0 0 8px", fontSize: 13, color: "#1d4ed8" }}>{t("rd.loaded_photo_release_hint")}</p>
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>{t("rd.loaded_return_photo_label")}</div>
+            {route.loaded_return_photo_url ? (
+              <a href={route.loaded_return_photo_url} target="_blank" rel="noreferrer" style={{ fontSize: 13 }}>{t("rd.view_photo")}</a>
+            ) : (
+              <span style={{ fontSize: 13, color: "#b91c1c" }}>{t("rd.photo_pending")}</span>
+            )}
+            <div>
+              <input
+                style={input}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                disabled={uploadingClosingPhoto !== null}
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadClosingPhoto("loaded-return-photo", f); e.target.value = ""; }}
+              />
+            </div>
+          </div>
+        )}
         {!isClosed && allStopsClosed && (
           <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: 10, marginBottom: 12 }}>
             <p style={{ margin: "0 0 8px", fontSize: 13, color: "#9a3412" }}>{t("rd.closing_photos_hint")}</p>
@@ -607,24 +629,6 @@ export default function RouteDetail() {
                     capture="environment"
                     disabled={uploadingClosingPhoto !== null}
                     onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadClosingPhoto("empty-truck-photo", f); e.target.value = ""; }}
-                  />
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>{t("rd.loaded_return_photo_label")}</div>
-                {route.loaded_return_photo_url ? (
-                  <a href={route.loaded_return_photo_url} target="_blank" rel="noreferrer" style={{ fontSize: 13 }}>{t("rd.view_photo")}</a>
-                ) : (
-                  <span style={{ fontSize: 13, color: "#b91c1c" }}>{t("rd.photo_pending")}</span>
-                )}
-                <div>
-                  <input
-                    style={input}
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    disabled={uploadingClosingPhoto !== null}
-                    onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadClosingPhoto("loaded-return-photo", f); e.target.value = ""; }}
                   />
                 </div>
               </div>

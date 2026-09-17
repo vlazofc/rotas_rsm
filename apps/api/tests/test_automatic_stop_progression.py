@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Branch, DockSession, OccurrenceCategory, Route, RouteEvent, RouteStop, Tenant, User
+from app.db.models import Attachment, Branch, DockSession, OccurrenceCategory, Route, RouteEvent, RouteStop, Tenant, User
 from app.db.session import Base
 from app.modules.erp_admin.router import OccurrenceIn, create_occurrence
 from app.modules.routes.router import deliver, operator_release
@@ -40,6 +40,10 @@ def test_release_and_delivery_automatically_start_next_stop():
             )
             db.add_all([user, route])
             db.flush()
+            loaded_photo = Attachment(bucket="tests", storage_key="loaded.jpg", content_type="image/jpeg")
+            db.add(loaded_photo)
+            db.flush()
+            route.loaded_return_photo_attachment_id = loaded_photo.id
             db.add(DockSession(route_id=route.id, arrival_cd_at=datetime.now(timezone.utc)))
             first = RouteStop(route_id=route.id, sequence=1, customer_name="Primeiro", stop_type="carga")
             second = RouteStop(route_id=route.id, sequence=2, customer_name="Segundo", stop_type="carga")

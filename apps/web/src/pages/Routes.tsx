@@ -25,6 +25,8 @@ interface RouteItem {
   origin_address?: string | null; driver_id?: number | null; vehicle_id?: number | null;
   status: string; stops: Stop[]; dock_session?: DockSession | null;
   source?: string; fieldeas_description?: string | null; fieldeas_sync_at?: string | null;
+  empty_truck_photo_attachment_id?: number | null;
+  loaded_return_photo_attachment_id?: number | null;
 }
 interface DockSession {
   arrival_cd_at?: string | null;
@@ -138,6 +140,11 @@ export default function RoutesPage() {
   const [warehouseBatchFiles, setWarehouseBatchFiles] = useState<Record<number, File | null>>({});
   const [warehouseBatchError, setWarehouseBatchError] = useState("");
   const [warehouseBatchSaving, setWarehouseBatchSaving] = useState(false);
+  const [emptyTruckFile, setEmptyTruckFile] = useState<File | null>(null);
+  const [releasePhotoRoute, setReleasePhotoRoute] = useState<RouteItem | null>(null);
+  const [releasePhotoFile, setReleasePhotoFile] = useState<File | null>(null);
+  const [releasePhotoError, setReleasePhotoError] = useState("");
+  const [releasePhotoSaving, setReleasePhotoSaving] = useState(false);
   const [routeFilter, setRouteFilter] = useState<RouteFilter>("open");
   const [routeView, setRouteView] = useState<RouteView>("map");
   const [assignmentDate, setAssignmentDate] = useState("");
@@ -188,11 +195,18 @@ export default function RoutesPage() {
   async function act(id: number, path: string) {
     setError("");
     const route = routes.find((item) => item.id === id);
+    if (path === "release" && route && !route.loaded_return_photo_attachment_id) {
+      setReleasePhotoRoute(route);
+      setReleasePhotoFile(null);
+      setReleasePhotoError("");
+      return;
+    }
     if (path === "close" && route) {
       const missing = missingWarehouseStops(route);
-      if (missing.length > 0) {
+      if (missing.length > 0 || !route.empty_truck_photo_attachment_id) {
         setWarehouseBatchRoute(route);
         setWarehouseBatchFiles(Object.fromEntries(missing.map((stop) => [stop.id, null])));
+        setEmptyTruckFile(null);
         setWarehouseBatchError("");
         return;
       }
@@ -305,6 +319,10 @@ export default function RoutesPage() {
       setWarehouseBatchError(t("rd.warehouse_batch_required", { list: missingFiles.map((stop) => stop.sequence ?? stop.id).join(", ") }));
       return;
     }
+    if (!warehouseBatchRoute.empty_truck_photo_attachment_id && !emptyTruckFile) {
+      setWarehouseBatchError(t("rd.empty_truck_photo_required"));
+      return;
+    }
     setWarehouseBatchSaving(true);
     try {
       for (const stop of missing) {
@@ -312,15 +330,35 @@ export default function RoutesPage() {
         payload.set("proof", warehouseBatchFiles[stop.id] as File);
         await api.post(`/routes/${warehouseBatchRoute.id}/stops/${stop.id}/warehouse-return-proof`, payload);
       }
+      if (!warehouseBatchRoute.empty_truck_photo_attachment_id && emptyTruckFile) {
+        const tagged = await applyTimemark(emptyTruckFile, {routeCode:warehouseBatchRoute.codigo_ut,driverName:user?.role==="motorista"?user.name:drivers.find(d=>d.id===warehouseBatchRoute.driver_id)?.name,vehiclePlate:vehicles.find(v=>v.id===warehouseBatchRoute.vehicle_id)?.plate});
+        const payload = new FormData(); payload.set("photo", tagged);
+        await api.post(`/routes/${warehouseBatchRoute.id}/empty-truck-photo`, payload);
+      }
       await api.post(`/routes/${warehouseBatchRoute.id}/close`);
       setWarehouseBatchRoute(null);
       setWarehouseBatchFiles({});
+      setEmptyTruckFile(null);
       reload();
     } catch (err: any) {
       setWarehouseBatchError(formatApiError(err?.response?.data?.detail) ?? t("route.action_error"));
     } finally {
       setWarehouseBatchSaving(false);
     }
+  }
+
+  async function confirmReleasePhoto(e: React.FormEvent) {
+    e.preventDefault();
+    if (!releasePhotoRoute || !releasePhotoFile) { setReleasePhotoError(t("rd.loaded_photo_required")); return; }
+    setReleasePhotoSaving(true); setReleasePhotoError("");
+    try {
+      const tagged = await applyTimemark(releasePhotoFile, {routeCode:releasePhotoRoute.codigo_ut,driverName:user?.role==="motorista"?user.name:drivers.find(d=>d.id===releasePhotoRoute.driver_id)?.name,vehiclePlate:vehicles.find(v=>v.id===releasePhotoRoute.vehicle_id)?.plate});
+      const payload = new FormData(); payload.set("photo", tagged);
+      await api.post(`/routes/${releasePhotoRoute.id}/loaded-return-photo`, payload);
+      await api.post(`/routes/${releasePhotoRoute.id}/release`);
+      setReleasePhotoRoute(null); setReleasePhotoFile(null); reload();
+    } catch (err: any) { setReleasePhotoError(formatApiError(err?.response?.data?.detail) ?? t("route.action_error")); }
+    finally { setReleasePhotoSaving(false); }
   }
 
   function startNew() {
@@ -860,12 +898,33 @@ export default function RoutesPage() {
         </div>
       )}
 
+      {releasePhotoRoute && (
+        <div className="modal-backdrop" onClick={() => { if (!releasePhotoSaving) setReleasePhotoRoute(null); }}>
+          <form className="modal-card modal-card-compact" onClick={(e) => e.stopPropagation()} onSubmit={confirmReleasePhoto}>
+            <h3>{t("rd.loaded_return_photo_label")}</h3>
+            <p>{releasePhotoRoute.codigo_ut} · {t("rd.loaded_photo_release_hint")}</p>
+            {releasePhotoError && <p className="modal-error">{releasePhotoError}</p>}
+            <UploadField id={`loaded-photo-${releasePhotoRoute.id}`} name="loaded_photo" accept="image/*" capture="environment" required file={releasePhotoFile} label={t("common.attach_proof")} selectedLabel={t("common.selected_file")} onChange={setReleasePhotoFile}/>
+            <div className="modal-actions">
+              <button type="submit" className="btn-primary" disabled={releasePhotoSaving}>{releasePhotoSaving ? t("rd.sending") : t("rd.send_and_release")}</button>
+              <button type="button" className="btn-ghost" disabled={releasePhotoSaving} onClick={() => setReleasePhotoRoute(null)}>{t("common.cancel")}</button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {warehouseBatchRoute && (
         <div className="modal-backdrop" onClick={() => { if (!warehouseBatchSaving) setWarehouseBatchRoute(null); }}>
           <form className="modal-card" onClick={(e) => e.stopPropagation()} onSubmit={confirmWarehouseBatch}>
-            <h3>{t("rd.warehouse_batch_title")}</h3>
-            <p>{warehouseBatchRoute.codigo_ut} · {t("rd.warehouse_batch_hint")}</p>
+            <h3>{t("rd.close_route_title")}</h3>
+            <p>{warehouseBatchRoute.codigo_ut} · {t("rd.close_route_photo_hint")}</p>
             {warehouseBatchError && <p className="modal-error">{warehouseBatchError}</p>}
+            {!warehouseBatchRoute.empty_truck_photo_attachment_id && (
+              <div className="field warehouse-proof-item">
+                <span>{t("rd.empty_truck_photo_label")}</span>
+                <UploadField id={`empty-truck-${warehouseBatchRoute.id}`} name="empty_truck_photo" accept="image/*" capture="environment" required file={emptyTruckFile} label={t("common.attach_proof")} selectedLabel={t("common.selected_file")} onChange={setEmptyTruckFile}/>
+              </div>
+            )}
             <div className="warehouse-proof-list">
               {missingWarehouseStops(warehouseBatchRoute).map((stop) => {
                 const inputId = `warehouse-proof-${warehouseBatchRoute.id}-${stop.id}`;

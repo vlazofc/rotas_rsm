@@ -252,13 +252,13 @@ def _guard_all_stops_closed(route: Route) -> None:
 
 
 def _guard_closing_photos(route: Route) -> None:
-    missing = []
     if not route.empty_truck_photo_attachment_id:
-        missing.append("foto do baú vazio")
+        raise HTTPException(status_code=409, detail="Envie antes de fechar a rota: foto do baú vazio.")
+
+
+def _guard_loaded_photo_for_release(route: Route) -> None:
     if not route.loaded_return_photo_attachment_id:
-        missing.append("foto do carro carregado com a devolução")
-    if missing:
-        raise HTTPException(status_code=409, detail=f"Envie antes de fechar a rota: {', '.join(missing)}.")
+        raise HTTPException(status_code=409, detail="Envie a foto do veículo carregado antes de liberar a saída do CD.")
 
 
 def _start_next_stop_travel(db: Session, *, route: Route, user: User) -> RouteStop | None:
@@ -591,6 +591,7 @@ def operator_release(route_id: int, db: Session = Depends(get_db), user: User = 
         raise HTTPException(status_code=409, detail="Registre a chegada ao CD antes da liberação.")
     if dock.operator_released_at or dock.departure_cd_at:
         raise HTTPException(status_code=409, detail="A liberação do CD já foi registrada.")
+    _guard_loaded_photo_for_release(route)
     now = datetime.now(timezone.utc)
     route_before = snapshot(route, ["status", "actual_departure_at"])
     dock_before = snapshot(dock, ["operator_released_at", "departure_cd_at", "loading_minutes", "total_cd_minutes"])
@@ -1042,12 +1043,14 @@ async def upload_loaded_return_photo(
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
-    attachment = await _save_route_proof(photo, route, "carro-carregado-devolucao")
+    if route.dock_session and route.dock_session.operator_released_at:
+        raise HTTPException(status_code=409, detail="A foto do veículo carregado deve ser enviada antes da liberação do CD.")
+    attachment = await _save_route_proof(photo, route, "veiculo-carregado")
     db.add(attachment)
     db.flush()
     route.loaded_return_photo_attachment_id = attachment.id
     record_event(db, route_id=route.id, event_type=EventType.CLOSING_PHOTO_UPLOADED, user_id=user.id,
-                 notes="Foto do carro carregado com a devolução enviada.")
+                 notes="Foto do veículo carregado enviada antes da liberação do CD.")
     log(db, user_id=user.id, action="loaded_return_photo", entity="route", entity_id=route.id)
     db.commit()
     return _load(db, route.id)
