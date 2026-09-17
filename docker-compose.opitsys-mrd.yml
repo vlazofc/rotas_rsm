@@ -1,0 +1,47 @@
+# Instalação independente na VPS; usar junto com docker-compose.yml.
+# docker compose -f docker-compose.yml -f docker-compose.opitsys-mrd.yml up -d
+name: opitsys_mrd
+
+services:
+  cloudflared:
+    container_name: opitsys_mrd_cloudflared
+  proxy:
+    container_name: opitsys_mrd_proxy
+    ports: !override
+      - "127.0.0.1:8189:80"
+  web:
+    container_name: opitsys_mrd_web
+    image: opitsys_mrd-web:latest
+  api:
+    container_name: opitsys_mrd_api
+    image: opitsys_mrd-api:latest
+    ports: !reset []
+  worker:
+    container_name: opitsys_mrd_worker
+    image: opitsys_mrd-worker:latest
+  scheduler:
+    container_name: opitsys_mrd_scheduler
+    image: opitsys_mrd-scheduler:latest
+  postgres:
+    container_name: opitsys_mrd_postgres
+    ports: !reset []
+  redis:
+    container_name: opitsys_mrd_redis
+    ports: !reset []
+  minio:
+    container_name: opitsys_mrd_minio
+    ports: !reset []
+  backup:
+    container_name: opitsys_mrd_backup
+
+volumes:
+  postgres_data:
+    name: opitsys_mrd_postgres_data
+  redis_data:
+    name: opitsys_mrd_redis_data
+  minio_data:
+    name: opitsys_mrd_minio_data
+  caddy_data:
+    name: opitsys_mrd_caddy_data
+  caddy_config:
+    name: opitsys_mrd_caddy_config

@@ -20,10 +20,10 @@ from app.services.audit import log_update, snapshot
 router = APIRouter(prefix="/branding", tags=["branding"])
 
 SUPPORTED_LOCALES = {"pt-BR"}
-ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/svg+xml", "image/x-icon", "image/vnd.microsoft.icon"}
+ALLOWED_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/x-icon", "image/vnd.microsoft.icon"}
 EXTENSION_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
-    ".svg": "image/svg+xml", ".ico": "image/x-icon",
+    ".ico": "image/x-icon",
 }
 
 

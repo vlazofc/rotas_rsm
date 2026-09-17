@@ -6,16 +6,20 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import Role, require_feature, require_same_branch
-from app.db.models import Driver, ProviderVehiclePosition, Route, TrackingConsent, User, Vehicle, VehiclePosition
+from app.core.permissions import Role, require_branch_access, require_feature, require_roles, scope_by_branch
+from app.db.models import AppPermissionConsent, Driver, ProviderVehiclePosition, Route, TrackingConsent, User, Vehicle, VehiclePosition
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 
 router = APIRouter(prefix="/tracking", tags=["tracking"], dependencies=[Depends(require_feature("feature_rastreamento"))])
 
+CLOSED_STATES = {"finalizada", "cancelada"}
+
 class ConsentIn(BaseModel):
     accepted: bool
     terms_version: str = "1.0"
+
+APP_PERMISSION_TERMS_VERSION = "1.0"
 
 class PositionIn(BaseModel):
     route_id: int
@@ -38,6 +42,35 @@ def update_consent(data: ConsentIn, db: Session = Depends(get_db), user: User = 
     db.add(row); db.commit()
     return {"accepted": row.accepted, "terms_version": row.terms_version}
 
+@router.get("/app-permission-consent")
+def app_permission_consent(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    row = db.scalar(select(AppPermissionConsent).where(
+        AppPermissionConsent.user_id == user.id,
+        AppPermissionConsent.accepted.is_(True),
+        AppPermissionConsent.terms_version == APP_PERMISSION_TERMS_VERSION,
+    ).order_by(AppPermissionConsent.id.desc()))
+    return {
+        "accepted": bool(row),
+        "terms_version": APP_PERMISSION_TERMS_VERSION,
+        "accepted_at": row.accepted_at if row else None,
+    }
+
+@router.put("/app-permission-consent")
+def accept_app_permission_consent(data: ConsentIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if not data.accepted:
+        raise HTTPException(422, "O aceite é obrigatório para utilizar os recursos do aplicativo.")
+    if data.terms_version != APP_PERMISSION_TERMS_VERSION:
+        raise HTTPException(409, "A versão do termo foi atualizada. Recarregue a página.")
+    row = AppPermissionConsent(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        accepted=True,
+        accepted_at=datetime.now(timezone.utc),
+        terms_version=APP_PERMISSION_TERMS_VERSION,
+    )
+    db.add(row); db.commit(); db.refresh(row)
+    return {"accepted": True, "terms_version": row.terms_version, "accepted_at": row.accepted_at}
+
 @router.post("/positions", status_code=201)
 def record_position(data: PositionIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     accepted = db.scalar(select(TrackingConsent).where(TrackingConsent.user_id == user.id, TrackingConsent.accepted.is_(True)).order_by(TrackingConsent.id.desc()))
@@ -46,7 +79,9 @@ def record_position(data: PositionIn, db: Session = Depends(get_db), user: User 
     route = db.get(Route, data.route_id)
     if route is None:
         raise HTTPException(404, "Rota não encontrada.")
-    require_same_branch(user, route.branch_id)
+    if route.status in CLOSED_STATES:
+        raise HTTPException(409, "Rastreamento indisponível: a rota já foi encerrada.")
+    require_branch_access(db, user, route.branch_id)
     if user.role == Role.MOTORISTA.value:
         driver = db.scalar(select(Driver).where(Driver.user_id == user.id))
         if driver is None or route.driver_id != driver.id:
@@ -58,18 +93,16 @@ def record_position(data: PositionIn, db: Session = Depends(get_db), user: User 
     db.add(row); db.commit()
     return {"id": row.id, "recorded_at": row.recorded_at}
 
-@router.get("/live")
+@router.get("/live", dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.TORRE_CONTROLE))])
 def live_positions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    if user.role not in {Role.ADMIN_GLOBAL.value, Role.GESTOR_BRASIL.value, Role.TORRE_CONTROLE.value}:
-        raise HTTPException(403, "Perfil sem permissão para monitoramento.")
     latest = select(VehiclePosition.route_id, func.max(VehiclePosition.recorded_at).label("latest")).group_by(VehiclePosition.route_id).subquery()
     stmt = (select(VehiclePosition, Route.codigo_ut, Vehicle.plate, Driver.name)
             .join(latest, (latest.c.route_id == VehiclePosition.route_id) & (latest.c.latest == VehiclePosition.recorded_at))
             .join(Route, Route.id == VehiclePosition.route_id)
             .outerjoin(Vehicle, Vehicle.id == VehiclePosition.vehicle_id)
-            .outerjoin(Driver, Driver.id == VehiclePosition.driver_id))
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id:
-        stmt = stmt.where(VehiclePosition.branch_id == user.branch_id)
+            .outerjoin(Driver, Driver.id == VehiclePosition.driver_id)
+            .where(Route.status.not_in(CLOSED_STATES)))
+    stmt = scope_by_branch(stmt, VehiclePosition.branch_id, user, db)
     result = [{"route_id": p.route_id, "codigo_ut": code, "vehicle_plate": plate, "driver_name": name,
              "latitude": p.latitude, "longitude": p.longitude, "accuracy_m": p.accuracy_m,
              "speed_kmh": p.speed_kmh, "recorded_at": p.recorded_at, "source": "app"} for p, code, plate, name in db.execute(stmt).all()]
@@ -80,9 +113,9 @@ def live_positions(db: Session = Depends(get_db), user: User = Depends(get_curre
                            (provider_latest.c.latest == ProviderVehiclePosition.recorded_at))
                      .join(Route, Route.id == ProviderVehiclePosition.route_id)
                      .outerjoin(Vehicle, Vehicle.id == ProviderVehiclePosition.vehicle_id)
-                     .outerjoin(Driver, Driver.id == Route.driver_id))
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id:
-        provider_stmt = provider_stmt.where(ProviderVehiclePosition.branch_id == user.branch_id)
+                     .outerjoin(Driver, Driver.id == Route.driver_id)
+                     .where(Route.status.not_in(CLOSED_STATES)))
+    provider_stmt = scope_by_branch(provider_stmt, ProviderVehiclePosition.branch_id, user, db)
     provider_rows = [{"route_id": p.route_id, "codigo_ut": code, "vehicle_plate": plate, "driver_name": name,
                       "latitude": p.latitude, "longitude": p.longitude, "accuracy_m": None,
                       "speed_kmh": p.speed_kmh, "recorded_at": p.recorded_at, "source": "truckcontrol"}

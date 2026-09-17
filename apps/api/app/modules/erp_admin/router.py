@@ -15,11 +15,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import FINANCE_ACCOUNTS_MANAGE, FINANCE_VIEW, Role, require_branch_access, require_permission, require_roles
-from app.db.models import Attachment, ContentItem, Driver, DriverSettings, DriverStatementAdjustment, DriverStatementPeriod, Expense, FinancialAccount, FinancialCategory, MaintenanceOrder, Part, PurchaseItem, PurchaseTicket, Revenue, Route, RouteOccurrence, RouteOccurrenceEvent, RouteStop, StockMovement, Supplier, User, Vehicle, WorkflowTask, WorkflowTaskEvent
+from app.core.permissions import FINANCE_ACCOUNTS_MANAGE, FINANCE_VIEW, ROLE_EQUIVALENTS, Role, require_branch_access, require_permission, require_roles, scope_by_branch
+from app.db.models import Attachment, Branch, ContentItem, Driver, DriverSettings, DriverStatementAdjustment, DriverStatementPeriod, Expense, FinancialAccount, FinancialCategory, MaintenanceOrder, OccurrenceCategory, Part, PurchaseItem, PurchaseTicket, Revenue, Route, RouteOccurrence, RouteOccurrenceEvent, RouteStop, StockMovement, Supplier, User, Vehicle, WorkflowTask, WorkflowTaskEvent
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log
+from app.services.events import notify_operational_audience
 from app.services import storage
 from app.core.config import settings
 
@@ -30,6 +31,12 @@ _OCCURRENCE_ACCESS = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.T
 _FINANCE = require_permission(FINANCE_VIEW, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO)
 _FINANCE_MANAGE = require_permission(FINANCE_ACCOUNTS_MANAGE, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO)
 _PURCHASE_STAFF = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.OPERADOR_LOGISTICO)
+
+
+DEFAULT_OCCURRENCE_CATEGORIES = (
+    ("avaria", "Avaria"), ("acidente", "Acidente"), ("atraso", "Atraso"),
+    ("seguranca", "Segurança"), ("outros", "Outros"),
+)
 
 class ContentIn(BaseModel):
     branch_id: int | None = None
@@ -42,7 +49,7 @@ class ContentIn(BaseModel):
 def list_content(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stmt = select(ContentItem).order_by(ContentItem.created_at.desc())
     if user.role != Role.ADMIN_GLOBAL.value:
-        stmt = stmt.where(ContentItem.tenant_id == user.tenant_id, (ContentItem.branch_id.is_(None)) | (ContentItem.branch_id == user.branch_id))
+        stmt = stmt.where(ContentItem.tenant_id == user.tenant_id, (ContentItem.branch_id.is_(None)) | (ContentItem.branch_id == (user.branch_id if user.branch_id is not None else -1)))
         if user.role not in {Role.GESTOR_BRASIL.value}: stmt = stmt.where(ContentItem.published.is_(True))
     return db.scalars(stmt).all()
 
@@ -87,7 +94,7 @@ class MovementIn(BaseModel):
 @router.get("/parts")
 def parts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stmt = select(Part).where(Part.active.is_(True)).order_by(Part.name)
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id: stmt = stmt.where(Part.branch_id == user.branch_id)
+    stmt = scope_by_branch(stmt, Part.branch_id, user, db)
     return db.scalars(stmt).all()
 
 @router.post("/parts", dependencies=[Depends(_MANAGER)])
@@ -136,17 +143,122 @@ def occurrences(db: Session = Depends(get_db), user: User = Depends(get_current_
     stmt = (select(RouteOccurrence, Route.codigo_ut, Vehicle.plate, Driver.name)
             .join(Route, Route.id == RouteOccurrence.route_id).outerjoin(Vehicle, Vehicle.id == Route.vehicle_id)
             .outerjoin(Driver, Driver.id == RouteOccurrence.driver_id).order_by(RouteOccurrence.created_at.desc()))
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id: stmt = stmt.where(RouteOccurrence.branch_id == user.branch_id)
+    if user.role != Role.MOTORISTA.value:
+        stmt = scope_by_branch(stmt, RouteOccurrence.branch_id, user, db)
     if user.role == Role.MOTORISTA.value: stmt = stmt.where(RouteOccurrence.reported_by == user.id)
     rows = db.execute(stmt).all()
     assignees = {item.id: item.name for item in db.scalars(select(User).where(User.id.in_([o.assigned_to_id for o, *_ in rows if o.assigned_to_id]))).all()}
+    evidence = {item.id: item for item in db.scalars(select(Attachment).where(Attachment.id.in_([o.evidence_attachment_id for o, *_ in rows if o.evidence_attachment_id]))).all()}
     return [{"id": o.id, "route_id": o.route_id, "codigo_ut": code, "plate": plate, "driver": driver,
              "category": o.category, "severity": o.severity, "description": o.description, "status": o.status,
              "latitude": o.latitude, "longitude": o.longitude, "resolution": o.resolution,
              "assigned_to_id": o.assigned_to_id, "assigned_to": assignees.get(o.assigned_to_id),
+             "evidence_url": storage.get_presigned_url(evidence[o.evidence_attachment_id].bucket, evidence[o.evidence_attachment_id].storage_key) if o.evidence_attachment_id in evidence else None,
              "treatment_started_at": o.treatment_started_at, "resolved_at": o.resolved_at,
              "finalized_at": o.finalized_at, "created_at": o.created_at}
             for o, code, plate, driver in rows]
+
+
+@router.post("/occurrences/{occurrence_id}/evidence", dependencies=[Depends(_OCCURRENCE_ACCESS)])
+async def upload_occurrence_evidence(occurrence_id: int, evidence: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    row = db.get(RouteOccurrence, occurrence_id)
+    if row is None: raise HTTPException(404, "Ocorrência não encontrada.")
+    require_branch_access(db, user, row.branch_id)
+    if not _can_manage_occurrence(user, row): raise HTTPException(403, "Sem permissão para evidenciar esta ocorrência.")
+    content_type = evidence.content_type or "application/octet-stream"
+    if content_type not in {"application/pdf", "image/png", "image/jpeg", "image/jpg", "image/webp"}:
+        raise HTTPException(415, "A evidência deve ser uma foto ou PDF.")
+    content = await evidence.read()
+    if not content: raise HTTPException(400, "Arquivo vazio.")
+    if len(content) > settings.max_upload_mb * 1024 * 1024: raise HTTPException(413, f"Arquivo acima de {settings.max_upload_mb} MB.")
+    storage.ensure_buckets()
+    filename = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(evidence.filename or "evidencia").name)[:120]
+    key = f"ocorrencias/{row.branch_id}/{row.route_id}/{row.id}/{uuid.uuid4().hex}-{filename}"
+    storage.put_object(settings.minio_bucket_proofs, key, content, content_type)
+    attachment = Attachment(bucket=settings.minio_bucket_proofs, storage_key=key, content_type=content_type, size_bytes=len(content))
+    db.add(attachment); db.flush(); row.evidence_attachment_id = attachment.id
+    log(db, user_id=user.id, action="upload_evidence", entity="route_occurrence", entity_id=row.id)
+    db.commit()
+    return {"evidence_url": storage.get_presigned_url(attachment.bucket, attachment.storage_key)}
+
+class OccurrenceCategoryIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+
+class OccurrenceCategoryOut(BaseModel):
+    id: int
+    code: str
+    name: str
+    active: bool
+    system: bool
+
+    class Config:
+        from_attributes = True
+
+def _occurrence_category_code(value: str) -> str:
+    normalized = "".join(character for character in unicodedata.normalize("NFD", value.lower().strip()) if unicodedata.category(character) != "Mn")
+    code = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")[:40]
+    if not code: raise HTTPException(422, "Informe um nome válido para a categoria.")
+    return code
+
+def _ensure_occurrence_categories(db: Session, tenant_id: int | None) -> None:
+    if tenant_id is None: return
+    existing_codes = set(db.scalars(select(OccurrenceCategory.code).where(OccurrenceCategory.tenant_id == tenant_id)).all())
+    for code, name in DEFAULT_OCCURRENCE_CATEGORIES:
+        if code not in existing_codes:
+            db.add(OccurrenceCategory(tenant_id=tenant_id, code=code, name=name, active=True, system=True))
+    legacy_codes = db.scalars(select(RouteOccurrence.category).where(RouteOccurrence.tenant_id == tenant_id).distinct()).all()
+    default_names = dict(DEFAULT_OCCURRENCE_CATEGORIES)
+    for code in legacy_codes:
+        if code and code not in existing_codes:
+            db.add(OccurrenceCategory(tenant_id=tenant_id, code=code, name=default_names.get(code, code.replace("_", " ").title()), active=True))
+    db.flush()
+
+def _require_occurrence_category(db: Session, tenant_id: int | None, code: str, *, allow_inactive: bool = False) -> OccurrenceCategory:
+    _ensure_occurrence_categories(db, tenant_id)
+    row = db.scalar(select(OccurrenceCategory).where(OccurrenceCategory.tenant_id == tenant_id, OccurrenceCategory.code == code))
+    if row is None or (not row.active and not allow_inactive):
+        raise HTTPException(422, "Selecione uma categoria de ocorrência ativa.")
+    return row
+
+@router.get("/occurrence-categories", response_model=list[OccurrenceCategoryOut], dependencies=[Depends(_OCCURRENCE_ACCESS)])
+def occurrence_categories(include_inactive: bool = False, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _ensure_occurrence_categories(db, user.tenant_id)
+    stmt = select(OccurrenceCategory).where(OccurrenceCategory.tenant_id == user.tenant_id)
+    if not include_inactive: stmt = stmt.where(OccurrenceCategory.active.is_(True))
+    rows = db.scalars(stmt.order_by(OccurrenceCategory.name)).all()
+    db.commit()
+    return rows
+
+@router.post("/occurrence-categories", response_model=OccurrenceCategoryOut, status_code=201, dependencies=[Depends(_MANAGER)])
+def create_occurrence_category(data: OccurrenceCategoryIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if user.tenant_id is None: raise HTTPException(422, "Empresa não identificada.")
+    code = _occurrence_category_code(data.name)
+    existing = db.scalar(select(OccurrenceCategory).where(OccurrenceCategory.tenant_id == user.tenant_id, OccurrenceCategory.code == code))
+    if existing:
+        if existing.active: raise HTTPException(409, "Esta categoria já está cadastrada.")
+        existing.name, existing.active = data.name.strip(), True
+        row = existing
+    else:
+        row = OccurrenceCategory(tenant_id=user.tenant_id, code=code, name=data.name.strip())
+        db.add(row)
+    db.flush(); log(db, user_id=user.id, action="create", entity="occurrence_category", entity_id=row.id)
+    db.commit(); db.refresh(row); return row
+
+@router.put("/occurrence-categories/{category_id}", response_model=OccurrenceCategoryOut, dependencies=[Depends(_MANAGER)])
+def update_occurrence_category(category_id: int, data: OccurrenceCategoryIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    row = db.get(OccurrenceCategory, category_id)
+    if row is None or row.tenant_id != user.tenant_id: raise HTTPException(404, "Categoria não encontrada.")
+    row.name = data.name.strip()
+    log(db, user_id=user.id, action="update", entity="occurrence_category", entity_id=row.id)
+    db.commit(); db.refresh(row); return row
+
+@router.put("/occurrence-categories/{category_id}/toggle", response_model=OccurrenceCategoryOut, dependencies=[Depends(_MANAGER)])
+def toggle_occurrence_category(category_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    row = db.get(OccurrenceCategory, category_id)
+    if row is None or row.tenant_id != user.tenant_id: raise HTTPException(404, "Categoria não encontrada.")
+    row.active = not row.active
+    log(db, user_id=user.id, action="activate" if row.active else "deactivate", entity="occurrence_category", entity_id=row.id)
+    db.commit(); db.refresh(row); return row
 
 class OccurrenceIn(BaseModel):
     route_id: int
@@ -161,17 +273,45 @@ def create_occurrence(data: OccurrenceIn, db: Session = Depends(get_db), user: U
     route = db.get(Route, data.route_id)
     if route is None: raise HTTPException(404, "Rota não encontrada.")
     require_branch_access(db, user, route.branch_id)
-    if data.category not in {"avaria", "acidente", "atraso", "seguranca", "outros"}: raise HTTPException(400, "Categoria inválida.")
+    _require_occurrence_category(db, route.tenant_id, data.category)
     if data.severity not in {"baixa", "media", "alta", "critica"}: raise HTTPException(400, "Gravidade inválida.")
     driver = db.scalar(select(Driver).where(Driver.user_id == user.id)) if user.role == Role.MOTORISTA.value else None
     if user.role == Role.MOTORISTA.value and driver is None: raise HTTPException(403, "Usuário sem cadastro de motorista vinculado.")
     if driver and route.driver_id != driver.id: raise HTTPException(403, "Rota não atribuída a este motorista.")
     row = RouteOccurrence(tenant_id=route.tenant_id, branch_id=route.branch_id, route_id=route.id, driver_id=route.driver_id, reported_by=user.id, **data.model_dump(exclude={"route_id"}))
     db.add(row); db.flush()
+    # Uma ocorrência interrompe somente o deslocamento automático. Check-ins já
+    # realizados representam chegada real e, portanto, nunca são apagados.
+    for stop in route.stops:
+        if stop.status == "em_rota" and stop.checkin_at is None:
+            stop.status = "pendente"
     db.add(RouteOccurrenceEvent(occurrence_id=row.id, actor_id=user.id, from_status=None,
                                 to_status="aberta", description="Ocorrência registrada."))
+    notify_operational_audience(
+        db,
+        route=route,
+        event_type="OCCURRENCE_CREATED",
+        title="Nova ocorrência registrada",
+        body=f"Rota {route.codigo_ut} · {data.description[:120]}",
+    )
     log(db, user_id=user.id, action="create", entity="route_occurrence", entity_id=row.id)
     db.commit(); db.refresh(row); return row
+
+
+@router.post("/occurrences-with-evidence", status_code=201, dependencies=[Depends(_OCCURRENCE_REPORTER)])
+async def create_occurrence_with_required_evidence(
+    route_id: int = Form(...), category: str = Form(...), severity: str = Form("media"),
+    description: str = Form(...), latitude: float | None = Form(None), longitude: float | None = Form(None),
+    evidence: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    if category != "sobra": raise HTTPException(422, "Este envio é exclusivo para ocorrências de sobra.")
+    row = create_occurrence(
+        OccurrenceIn(route_id=route_id, category=category, severity=severity, description=description, latitude=latitude, longitude=longitude),
+        db=db, user=user,
+    )
+    await upload_occurrence_evidence(row.id, evidence, db=db, user=user)
+    db.refresh(row)
+    return row
 
 class OccurrenceUpdateIn(BaseModel):
     route_id: int | None = None
@@ -183,7 +323,8 @@ class OccurrenceUpdateIn(BaseModel):
     treatment_note: str | None = Field(default=None, max_length=2000)
 
 def _can_manage_occurrence(user: User, row: RouteOccurrence) -> bool:
-    return user.role in {Role.ADMIN_GLOBAL.value, Role.GESTOR_BRASIL.value, Role.TORRE_CONTROLE.value, Role.OPERADOR_LOGISTICO.value} or (
+    effective_role = ROLE_EQUIVALENTS.get(user.role, user.role)
+    return effective_role in {Role.ADMIN_GLOBAL.value, Role.GESTOR_BRASIL.value, Role.TORRE_CONTROLE.value, Role.OPERADOR_LOGISTICO.value} or (
         user.role == Role.MOTORISTA.value and row.reported_by == user.id
     )
 
@@ -203,7 +344,7 @@ def update_occurrence(occurrence_id: int, data: OccurrenceUpdateIn, db: Session 
             if driver is None or route.driver_id != driver.id: raise HTTPException(403, "Rota não atribuída a este motorista.")
         row.route_id, row.branch_id, row.driver_id = route.id, route.branch_id, route.driver_id
     if data.category is not None:
-        if data.category not in {"avaria", "acidente", "atraso", "seguranca", "outros"}: raise HTTPException(400, "Categoria inválida.")
+        _require_occurrence_category(db, row.tenant_id, data.category, allow_inactive=data.category == row.category)
         row.category = data.category
     if data.severity is not None:
         if data.severity not in {"baixa", "media", "alta", "critica"}: raise HTTPException(400, "Gravidade inválida.")
@@ -280,7 +421,7 @@ def _purchase_out(db:Session,row:PurchaseTicket):
 @router.get("/purchases")
 def purchases(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stmt = select(PurchaseTicket).order_by(PurchaseTicket.created_at.desc())
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id: stmt = stmt.where(PurchaseTicket.branch_id == user.branch_id)
+    stmt = scope_by_branch(stmt, PurchaseTicket.branch_id, user, db)
     purchase_viewers={Role.GESTOR_BRASIL.value,Role.GESTOR_FINANCEIRO.value,Role.OPERADOR_LOGISTICO.value}
     if user.role not in purchase_viewers and user.role!=Role.ADMIN_GLOBAL.value:
         stmt=stmt.where(PurchaseTicket.requester_id==user.id)
@@ -454,7 +595,7 @@ def toggle_financial_category(category_id: int, db: Session = Depends(get_db), u
 def financial_accounts(kind: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     if kind not in {"payable", "receivable"}: raise HTTPException(400, "Tipo de conta inválido.")
     stmt = select(FinancialAccount).where(FinancialAccount.kind == kind).order_by(FinancialAccount.due_date, FinancialAccount.id)
-    if user.role != Role.ADMIN_GLOBAL.value: stmt = stmt.where(FinancialAccount.branch_id == user.branch_id)
+    stmt = scope_by_branch(stmt, FinancialAccount.branch_id, user, db)
     rows = db.scalars(stmt).all()
     return [{
         "id": row.id, "kind": row.kind, "description": row.description,
@@ -581,8 +722,8 @@ def cancel_financial_account(account_id:int,db:Session=Depends(get_db),user:User
 @router.get("/dre", dependencies=[Depends(_FINANCE)])
 def dre(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     revenue = select(func.coalesce(func.sum(Revenue.amount), 0)); expense = select(func.coalesce(func.sum(Expense.amount), 0)).where(Expense.approval_status == "approved")
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id:
-        revenue = revenue.where(Revenue.branch_id == user.branch_id); expense = expense.where(Expense.branch_id == user.branch_id)
+    if user.role != Role.ADMIN_GLOBAL.value:
+        revenue = revenue.where(Revenue.branch_id == (user.branch_id if user.branch_id is not None else -1)); expense = expense.where(Expense.branch_id == (user.branch_id if user.branch_id is not None else -1))
     if start: revenue = revenue.where(Revenue.revenue_date >= start); expense = expense.where(Expense.expense_date >= start)
     if end: revenue = revenue.where(Revenue.revenue_date <= end); expense = expense.where(Expense.expense_date <= end)
     rv, ex = float(db.scalar(revenue) or 0), float(db.scalar(expense) or 0)
@@ -654,8 +795,8 @@ def statement(start: date | None = None, end: date | None = None, driver_id:int|
     if customer:route_filter=route_filter.join(RouteStop,RouteStop.route_id==Route.id).where((RouteStop.customer_name.ilike(f"%{customer}%"))|(RouteStop.client_name.ilike(f"%{customer}%")))
     if driver_id or vehicle_id or customer:
         revenues=revenues.where(Revenue.route_id.in_(route_filter));expenses=expenses.where(Expense.route_id.in_(route_filter))
-    if user.role != Role.ADMIN_GLOBAL.value and user.branch_id:
-        revenues = revenues.where(Revenue.branch_id == user.branch_id); expenses = expenses.where(Expense.branch_id == user.branch_id)
+    if user.role != Role.ADMIN_GLOBAL.value:
+        revenues = revenues.where(Revenue.branch_id == (user.branch_id if user.branch_id is not None else -1)); expenses = expenses.where(Expense.branch_id == (user.branch_id if user.branch_id is not None else -1))
     if start: revenues = revenues.where(Revenue.revenue_date >= start); expenses = expenses.where(Expense.expense_date >= start)
     if end: revenues = revenues.where(Revenue.revenue_date <= end); expenses = expenses.where(Expense.expense_date <= end)
     rows = ([{"id": f"r-{row.id}", "date": row.revenue_date, "kind": "entrada", "description": row.notes or "Receita", "route": code, "amount": float(row.amount)} for row, code in db.execute(revenues).all()] +

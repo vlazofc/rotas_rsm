@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import extract, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.permissions import FINANCE_VIEW, Role, require_permission, require_roles
+from app.core.permissions import FINANCE_VIEW, Role, require_permission, require_roles, scope_by_branch
 from app.db.models import (
     Attachment, AuditLog, DeliveryFailureReason, Driver, Expense, FinancialAccount, MaintenanceOrder,
     Part, Revenue, Route, RouteOccurrence, RouteStop, Tire, User, Vehicle, WorkflowTask,
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 def overview_report(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Resumo gerencial multiárea para a central de relatórios."""
     def branch(stmt, model):
-        return stmt.where(model.branch_id == user.branch_id) if user.branch_id else stmt
+        return scope_by_branch(stmt, model.branch_id, user, db)
 
     route_stmt=branch(select(Route),Route)
     expense_stmt=branch(select(Expense).where(Expense.approval_status=="approved"),Expense)
@@ -60,7 +60,7 @@ def overview_report(start: date | None = None, end: date | None = None, db: Sess
     today=date.today()
     return {
         "period":{"start":start,"end":end},
-        "operation":{"routes":len(routes),"completed":sum(1 for row in routes if row.status=="finalizada"),"in_transit":sum(1 for row in routes if row.status=="em_rota"),"cancelled":sum(1 for row in routes if row.status=="cancelada"),"completion_rate":round(100*sum(1 for row in routes if row.status=="finalizada")/len(routes),1) if routes else 0,"km_total":round(sum(float(row.km_total_informed or 0) for row in routes),1),"tolls":round(sum(float(row.toll_outbound or 0)+float(row.toll_return or 0) for row in routes),2),"by_status":[{"label":key,"value":value} for key,value in route_status.items()]},
+        "operation":{"routes":len(routes),"completed":sum(1 for row in routes if row.status=="finalizada"),"in_transit":sum(1 for row in routes if row.status=="em_rota"),"cancelled":sum(1 for row in routes if row.status=="cancelada"),"completion_rate":round(100*sum(1 for row in routes if row.status=="finalizada")/len(routes),1) if routes else 0,"by_status":[{"label":key,"value":value} for key,value in route_status.items()]},
         "finance":{"revenue":revenue_total,"expense":expense_total,"result":round(revenue_total-expense_total,2),"margin":round(100*(revenue_total-expense_total)/revenue_total,1) if revenue_total else 0,"payable":round(pending_payable,2),"receivable":round(pending_receivable,2),"expenses_by_category":sum_by(expenses,lambda row:row.reason,lambda row:row.amount),"expenses_by_vehicle":sum_by(expenses,lambda row:vehicles.get(row.vehicle_id,"Sem veículo"),lambda row:row.amount)},
         "control":{"occurrences_open":sum(1 for row in occurrences if row.status not in {"finalizada","resolvida"}),"tasks_open":sum(1 for row in tasks if row.status=="open"),"tasks_in_progress":sum(1 for row in tasks if row.status=="in_progress"),"tasks_returned":sum(1 for row in tasks if row.status=="returned")},
         "fleet":{"maintenance_open":sum(1 for row in maintenance if row.status in {"aberta","em_andamento"}),"maintenance_overdue":sum(1 for row in maintenance if row.status not in {"concluida","cancelada"} and row.expected_completion_date and row.expected_completion_date<today),"tires_total":len(tires),"tires_attention":sum(1 for row in tires if row.status!="descartado" and row.tread_depth_mm is not None and row.tread_depth_mm<=3),"parts_low":sum(1 for row in parts if row.quantity<=row.minimum_quantity),"stock_value":round(sum(float(row.quantity or 0)*float(row.average_cost or 0) for row in parts),2)},
@@ -124,8 +124,7 @@ def _proof_rows(db: Session, user: User, start: date | None, end: date | None) -
         )
         .order_by(Route.route_date.desc(), Route.id.desc())
     )
-    if user.branch_id:
-        stmt = stmt.where(Route.branch_id == user.branch_id)
+    stmt = scope_by_branch(stmt, Route.branch_id, user, db)
     if start:
         stmt = stmt.where(Route.route_date >= start)
     if end:
@@ -148,8 +147,7 @@ def _expense_rows(db: Session, user: User, start: date | None, end: date | None)
         .options(selectinload(Expense.vehicle))
         .order_by(Expense.expense_date.desc(), Expense.id.desc())
     )
-    if user.branch_id:
-        stmt = stmt.where(Expense.branch_id == user.branch_id)
+    stmt = scope_by_branch(stmt, Expense.branch_id, user, db)
     if start:
         stmt = stmt.where(Expense.expense_date >= start)
     if end:
@@ -184,8 +182,7 @@ def export_routes_xlsx(
         .join(Vehicle, Vehicle.id == Route.vehicle_id, isouter=True)
         .order_by(Route.route_date.desc(), Route.id.desc(), RouteStop.sequence)
     )
-    if user.branch_id:
-        stmt = stmt.where(Route.branch_id == user.branch_id)
+    stmt = scope_by_branch(stmt, Route.branch_id, user, db)
     if start:
         stmt = stmt.where(Route.route_date >= start)
     if end:
@@ -198,7 +195,7 @@ def export_routes_xlsx(
         "Rota ID", "Codigo UT", "Data da rota", "Status", "Origem", "Morada origem",
         "Motorista", "Veiculo", "Entrega seq.", "Cliente", "Cidade", "Morada cliente",
         "Data planejada", "Hora planejada", "Status entrega", "Pedido", "Peso kg",
-        "Paletes", "Tipo de parada", "Portagem ida", "Portagem volta", "KM total", "Tipo devolução",
+        "Paletes", "Tipo de parada", "Tipo devolução",
         "Quantidade devolvida", "Comprovante entrega", "Comprovante devolução armazém",
     ]
     sheet.append(headers)
@@ -226,9 +223,6 @@ def export_routes_xlsx(
             stop.weight_kg if stop else None,
             stop.pallets if stop else None,
             stop.stop_type if stop else None,
-            float(route.toll_outbound) if route.toll_outbound is not None else None,
-            float(route.toll_return) if route.toll_return is not None else None,
-            route.km_total_informed,
             stop.return_type if stop else None,
             stop.returned_quantity if stop else None,
             _filename(stop.proof_attachment) if stop else None,
@@ -264,8 +258,7 @@ def export_failures_xlsx(
         .where(RouteStop.status == "falha")
         .order_by(Route.route_date.desc(), Route.id.desc(), RouteStop.sequence)
     )
-    if user.branch_id:
-        stmt = stmt.where(Route.branch_id == user.branch_id)
+    stmt = scope_by_branch(stmt, Route.branch_id, user, db)
     if start:
         stmt = stmt.where(Route.route_date >= start)
     if end:
@@ -562,9 +555,8 @@ def balancete(month: str, db: Session = Depends(get_db), user: User = Depends(ge
         extract("year", Expense.expense_date) == year, extract("month", Expense.expense_date) == month_num,
         Expense.approval_status == "approved",
     )
-    if user.branch_id:
-        revenue_stmt = revenue_stmt.where(Revenue.branch_id == user.branch_id)
-        expense_stmt = expense_stmt.where(Expense.branch_id == user.branch_id)
+    revenue_stmt = scope_by_branch(revenue_stmt, Revenue.branch_id, user, db)
+    expense_stmt = scope_by_branch(expense_stmt, Expense.branch_id, user, db)
 
     revenues = db.scalars(revenue_stmt).all()
     expenses = db.scalars(expense_stmt).all()

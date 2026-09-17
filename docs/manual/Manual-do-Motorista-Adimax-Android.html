@@ -1,0 +1,252 @@
+<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><base href="file:///C:/Users/rene.mendes/OneDrive%20-%20JM%20DISTRIBUI%C3%87%C3%83O/.%20oo/.sys_adimax/docs/manual/"><style>@page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+* { box-sizing: border-box; }
+body { font-family: "Segoe UI", Arial, sans-serif; color: #172033; font-size: 10.5pt; line-height: 1.48; margin: 0; }
+body::before { content: "ADIMAX LOG"; display: block; color: #111827; background: #ffb21a; border-radius: 10px; padding: 16px 20px; font-size: 14pt; font-weight: 800; letter-spacing: .08em; margin-bottom: 18px; }
+h1 { font-size: 27pt; line-height: 1.08; margin: 0 0 8px; color: #101827; page-break-after: avoid; }
+h2 { font-size: 17pt; color: #ad6200; margin: 26px 0 10px; padding-bottom: 5px; border-bottom: 2px solid #ffd98c; page-break-after: avoid; }
+h3 { font-size: 13pt; color: #25334d; margin: 19px 0 7px; page-break-after: avoid; }
+h4 { font-size: 11pt; margin: 15px 0 5px; page-break-after: avoid; }
+p { margin: 7px 0 9px; }
+ul, ol { margin: 7px 0 11px 22px; padding: 0; }
+li { margin: 3px 0; }
+blockquote { margin: 14px 0; padding: 10px 13px; background: #fff8e8; border-left: 4px solid #ffae00; color: #4d3b15; }
+table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 9pt; page-break-inside: auto; }
+tr { page-break-inside: avoid; }
+th { background: #202a3c; color: white; text-align: left; }
+th, td { border: 1px solid #cfd5df; padding: 6px 7px; vertical-align: top; }
+tr:nth-child(even) td { background: #f7f8fa; }
+code { background: #eef1f5; border-radius: 3px; padding: 1px 4px; font-size: 9pt; }
+img { display: block; max-width: 72mm; max-height: 155mm; object-fit: contain; margin: 14px auto; border: 1px solid #d7dce4; border-radius: 12px; box-shadow: 0 5px 18px #0002; }
+strong { color: #111827; }
+@media print { a { color: inherit; text-decoration: none; } h2 { break-before: auto; } }</style></head><body><h1 id="manual-do-motorista-aplicativo-adimax-android">Manual do Motorista — Aplicativo Adimax Android</h1>
+<p><strong>Tela de login, rotas e ocorrências</strong><br />
+Versão do manual: 1.1 — 15/09/2026</p>
+<h2 id="tela-de-login">1. Tela de login</h2>
+<p><img src="assets/motorista-login.png" alt="Tela de login do aplicativo Android" /></p>
+<p>A tela de login é a porta de entrada do aplicativo.</p>
+<h3 id="como-entrar">Como entrar</h3>
+<ol>
+<li>Abra o aplicativo <strong>Adimax Motorista</strong>.</li>
+<li>No campo <strong>Usuário ou e-mail</strong>, digite o acesso fornecido pela empresa.</li>
+<li>No campo <strong>Senha</strong>, digite sua senha.</li>
+<li>Toque em <strong>Entrar</strong>.</li>
+</ol>
+<p>No primeiro acesso, o aplicativo pode solicitar a criação de uma nova senha. Digite a nova senha, confirme-a e salve. Depois disso, use essa senha nos próximos acessos.</p>
+<h3 id="botoes-da-tela">Botões da tela</h3>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Função</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Usuário ou e-mail</td>
+<td>identifica o motorista que está entrando</td>
+</tr>
+<tr>
+<td>Senha</td>
+<td>recebe a senha pessoal de acesso</td>
+</tr>
+<tr>
+<td>Entrar</td>
+<td>valida os dados e abre as rotas do motorista</td>
+</tr>
+<tr>
+<td>Lua/sol</td>
+<td>alterna entre tema claro e escuro</td>
+</tr>
+<tr>
+<td>Bandeira</td>
+<td>seleciona o idioma disponível</td>
+</tr>
+</tbody>
+</table>
+<p>Se o acesso não funcionar, confira se usuário e senha foram digitados corretamente. Para senha esquecida, bloqueada ou expirada, solicite a redefinição ao responsável pela operação.</p>
+<h2 id="tela-de-rotas">2. Tela de rotas</h2>
+<p>Depois do login, o motorista é direcionado para <strong>Rotas</strong>. Essa tela mostra apenas as rotas atribuídas ao cadastro do motorista conectado.</p>
+<p><img src="assets/motorista-rotas.png" alt="Lista e fluxo de entregas no celular" /></p>
+<p><em>Exemplo demonstrativo da tela de rotas, com dados fictícios.</em></p>
+<h3 id="lista-de-rotas">2.1 Lista de rotas</h3>
+<p>Cada rota pode apresentar:</p>
+<ul>
+<li>número ou código da rota;</li>
+<li>data da operação;</li>
+<li>origem;</li>
+<li>veículo atribuído;</li>
+<li>situação atual;</li>
+<li>clientes e quantidade de paradas.</li>
+</ul>
+<h3 id="filtros">2.2 Filtros</h3>
+<table>
+<thead>
+<tr>
+<th>Filtro</th>
+<th>O que mostra</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Abertas</td>
+<td>rotas planejadas, liberadas ou em andamento</td>
+</tr>
+<tr>
+<td>Pendências anteriores</td>
+<td>rotas de dias anteriores que ainda precisam ser concluídas</td>
+</tr>
+<tr>
+<td>Fechadas</td>
+<td>rotas finalizadas ou canceladas</td>
+</tr>
+<tr>
+<td>Todas</td>
+<td>todas as rotas permitidas ao motorista</td>
+</tr>
+</tbody>
+</table>
+<p>Para trabalhar em uma rota, toque nela e selecione <strong>Abrir</strong>.</p>
+<h3 id="informacoes-da-rota">2.3 Informações da rota</h3>
+<p>Ao abrir a rota, confira código e data, origem, endereço do CD, motorista, veículo, situação, sequência das paradas, cliente, endereço, cidade, pedido e horário previsto.</p>
+<p><img src="assets/motorista-detalhe-rota.png" alt="Detalhes da rota no celular" /></p>
+<p><em>A tela de detalhe reúne dados da carga, etapas do CD e paradas.</em></p>
+<p>Antes de iniciar, confirme se a rota e o veículo estão corretos. Se houver divergência, comunique a operação antes de registrar as etapas.</p>
+<h3 id="chegada-e-liberacao-do-cd">2.4 Chegada e liberação do CD</h3>
+<ol>
+<li>Ao chegar ao centro de distribuição, toque em <strong>Chegada ao CD</strong>.</li>
+<li>Aguarde o carregamento e a autorização da operação.</li>
+<li>Quando estiver liberado para viajar, toque em <strong>Liberado do CD</strong>.</li>
+</ol>
+<p>O botão <strong>Liberado do CD</strong> também registra a saída do veículo e altera a rota para <strong>Em rota</strong>. Se um botão estiver desabilitado, a etapa anterior pode não ter sido concluída ou a rota pode já estar encerrada.</p>
+<h3 id="atender-uma-parada">2.5 Atender uma parada</h3>
+<p>As paradas devem ser atendidas na ordem apresentada.</p>
+<ol>
+<li>Confira o cliente, endereço e pedido.</li>
+<li>Ao chegar ao local, toque em <strong>Check-in</strong>.</li>
+<li>Faça a entrega.</li>
+<li>Toque em <strong>Entregar</strong>.</li>
+<li>Fotografe o canhoto/comprovante ou escolha um arquivo.</li>
+<li>Confira se o documento está legível.</li>
+<li>Toque em <strong>Confirmar entrega</strong>.</li>
+</ol>
+<p>Depois da confirmação, a parada muda para <strong>Entregue</strong> e recebe o horário da conclusão.</p>
+<h3 id="comprovante-de-entrega">2.6 Comprovante de entrega</h3>
+<p>Ao tocar em <strong>Entregar</strong>, o aplicativo permite abrir a câmera, escolher uma imagem armazenada no aparelho ou escolher um arquivo PDF.</p>
+<p><img src="assets/motorista-entrega.png" alt="Janela para anexar comprovante de entrega" /></p>
+<p>Enquadre o documento inteiro, evite sombra e reflexo, confirme se assinatura, carimbo, data e número estão legíveis e aguarde o envio terminar antes de sair da tela.</p>
+<h3 id="entrega-recusada-ou-devolucao">2.7 Entrega recusada ou devolução</h3>
+<p><img src="assets/motorista-recusado.png" alt="Janela de entrega recusada" /></p>
+<ol>
+<li>Toque em <strong>Recusado</strong>.</li>
+<li>Selecione o motivo da recusa.</li>
+<li>Escolha devolução <strong>Total</strong> ou <strong>Parcial</strong>.</li>
+<li>Se for parcial, informe a quantidade devolvida.</li>
+<li>Anexe uma foto ou documento que comprove a ocorrência.</li>
+<li>Escreva uma observação, quando necessário.</li>
+<li>Toque em <strong>Confirmar recusa</strong>.</li>
+</ol>
+<p>Ao retornar ao CD, abra novamente a parada e toque em <strong>Devolução entregue no CD</strong>. Anexe o comprovante de recebimento da mercadoria pelo armazém e salve.</p>
+<h3 id="situacoes-da-parada">2.8 Situações da parada</h3>
+<table>
+<thead>
+<tr>
+<th>Situação</th>
+<th>Significado</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pendente</td>
+<td>atendimento ainda não iniciado</td>
+</tr>
+<tr>
+<td>Em rota</td>
+<td>check-in ou deslocamento da parada em andamento</td>
+</tr>
+<tr>
+<td>Entregue</td>
+<td>entrega concluída com comprovante</td>
+</tr>
+<tr>
+<td>Recusado/Falha</td>
+<td>entrega não concluída e motivo registrado</td>
+</tr>
+<tr>
+<td>Devolvido</td>
+<td>mercadoria retornada total ou parcialmente</td>
+</tr>
+</tbody>
+</table>
+<h3 id="fechar-a-rota">2.9 Fechar a rota</h3>
+<ol>
+<li>Confira se nenhuma parada permanece pendente.</li>
+<li>Confira os comprovantes de entrega.</li>
+<li>Em caso de devolução, confirme o comprovante da entrega no CD.</li>
+<li>Toque em <strong>Fechar rota</strong>.</li>
+<li>Se a tela solicitar documentos pendentes, anexe cada comprovante.</li>
+<li>Toque em <strong>Enviar e fechar rota</strong>.</li>
+</ol>
+<p>Após o fechamento, os botões de check-in, entrega e recusa ficam bloqueados. Para corrigir uma rota encerrada, entre em contato com a operação.</p>
+<h2 id="tela-de-ocorrencias">3. Tela de ocorrências</h2>
+<p>A tela <strong>Ocorrências</strong> serve para comunicar problemas encontrados durante a operação e acompanhar o tratamento realizado pela equipe.</p>
+<p><img src="assets/motorista-ocorrencias.png" alt="Lista de ocorrências no celular" /></p>
+<p><em>Exemplo demonstrativo da lista, com rota e motorista fictícios.</em></p>
+<h3 id="lista-de-ocorrencias">3.1 Lista de ocorrências</h3>
+<p>A tela apresenta quantidade de ocorrências abertas, em tratamento, resolvidas e finalizadas, além de rota, categoria, gravidade, descrição, situação e responsável.</p>
+<p>Os filtros permitem visualizar tarefas pendentes, todas as ocorrências ou apenas uma situação específica.</p>
+<h3 id="registrar-uma-ocorrencia">3.2 Registrar uma ocorrência</h3>
+<p><img src="assets/motorista-nova-ocorrencia.png" alt="Formulário de nova ocorrência" /></p>
+<ol>
+<li>Toque em <strong>Nova ocorrência</strong>.</li>
+<li>Selecione uma rota disponível do dia.</li>
+<li>Escolha a <strong>Categoria</strong>.</li>
+<li>Escolha a <strong>Gravidade</strong>.</li>
+<li>Descreva claramente o que aconteceu.</li>
+<li>Anexe uma foto ou documento, quando necessário.</li>
+<li>Toque em <strong>Registrar ocorrência</strong>.</li>
+</ol>
+<h3 id="niveis-de-gravidade">3.3 Níveis de gravidade</h3>
+<table>
+<thead>
+<tr>
+<th>Gravidade</th>
+<th>Quando utilizar</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Baixa</td>
+<td>situação sem impacto imediato na entrega</td>
+</tr>
+<tr>
+<td>Média</td>
+<td>problema que precisa ser acompanhado pela operação</td>
+</tr>
+<tr>
+<td>Alta</td>
+<td>problema com impacto importante na rota ou entrega</td>
+</tr>
+<tr>
+<td>Crítica</td>
+<td>situação urgente, de segurança ou que interrompe a operação</td>
+</tr>
+</tbody>
+</table>
+<p>Em caso de risco à integridade física, pare em local seguro e acione imediatamente os canais de emergência e a operação. O registro no aplicativo não substitui uma ligação urgente.</p>
+<h3 id="como-escrever-uma-boa-descricao">3.4 Como escrever uma boa descrição</h3>
+<p>Informe o que aconteceu, local e horário, cliente ou parada envolvida, impacto na entrega e a ação que já foi tomada.</p>
+<p>Exemplo: <strong>“Cliente fechado às 14:35. Portaria sem resposta. Operação avisada e foto da fachada anexada.”</strong></p>
+<h3 id="editar-ou-excluir">3.5 Editar ou excluir</h3>
+<p>Enquanto a ocorrência estiver <strong>Aberta</strong>, o motorista pode tocar em <strong>Editar</strong> para corrigir os dados ou em <strong>Excluir</strong> para remover um registro feito por engano. Depois que a equipe assumir o tratamento, as alterações passam a ser controladas pela operação.</p>
+<h3 id="acompanhar-o-tratamento">3.6 Acompanhar o tratamento</h3>
+<p>As situações seguem normalmente:</p>
+<p><strong>Aberta → Em tratamento → Resolvida → Finalizada.</strong></p>
+<p>A ocorrência também pode ser cancelada quando registrada por engano ou quando deixar de ser aplicável. O histórico pode mostrar data, etapa, responsável, solução e observações da equipe.</p>
+<h2 id="resumo-rapido">4. Resumo rápido</h2>
+<h3 id="login">Login</h3>
+<p><strong>Abrir aplicativo → informar usuário → informar senha → Entrar.</strong></p>
+<h3 id="rota">Rota</h3>
+<p><strong>Abrir rota → Chegada ao CD → Liberado do CD → Check-in → Entregar ou Recusado → anexar comprovantes → Fechar rota.</strong></p>
+<h3 id="ocorrencia">Ocorrência</h3>
+<p><strong>Ocorrências → Nova ocorrência → selecionar rota → categoria → gravidade → descrição/evidência → Registrar ocorrência.</strong></p>
+</body></html>

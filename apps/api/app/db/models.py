@@ -1,4 +1,4 @@
-"""Modelos ORM — banco Rotas Brasil RSM (PostgreSQL + PostGIS)."""
+"""Modelos ORM — banco OPTISYS (PostgreSQL + PostGIS)."""
 from __future__ import annotations
 
 from datetime import datetime, date, time
@@ -10,6 +10,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
+from app.core.encrypted_types import EncryptedText
 
 
 class TimestampMixin:
@@ -30,6 +31,7 @@ class OperationalSettings(Base, TimestampMixin):
     require_warehouse_return_proof: Mapped[bool] = mapped_column(Boolean, default=True)
     require_failure_reason: Mapped[bool] = mapped_column(Boolean, default=True)
     require_returned_quantity: Mapped[bool] = mapped_column(Boolean, default=True)
+    routing_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     alert_due_days: Mapped[int] = mapped_column(Integer, default=3)
     alert_document_days: Mapped[int] = mapped_column(Integer, default=30)
     tire_warning_mm: Mapped[float] = mapped_column(Float, default=3.0)
@@ -50,25 +52,27 @@ class Tenant(Base, TimestampMixin):
     feature_rastreamento: Mapped[bool] = mapped_column(Boolean, default=True)
     feature_route_optimization: Mapped[bool] = mapped_column(Boolean, default=True)
     feature_km_calculation: Mapped[bool] = mapped_column(Boolean, default=True)
+    help_assistant_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # Conta SaaS — plano, mensalidade e controle interno de vencimento.
     billing_plan: Mapped[str | None] = mapped_column(String(60), nullable=True)
     billing_amount: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     billing_due_day: Mapped[int | None] = mapped_column(Integer, nullable=True)  # dia do mês (1-28)
     billing_last_payment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     legal_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
-    document: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    document: Mapped[str | None] = mapped_column(EncryptedText("tenants.document"), nullable=True, index=True)
     state_registration: Mapped[str | None] = mapped_column(String(40), nullable=True)
     address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     city: Mapped[str | None] = mapped_column(String(120), nullable=True)
     state: Mapped[str | None] = mapped_column(String(2), nullable=True)
     postal_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    email: Mapped[str | None] = mapped_column(String(180), nullable=True)
-    antt_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    phone: Mapped[str | None] = mapped_column(EncryptedText("tenants.phone"), nullable=True)
+    email: Mapped[str | None] = mapped_column(EncryptedText("tenants.email"), nullable=True)
+    antt_number: Mapped[str | None] = mapped_column(EncryptedText("tenants.antt_number"), nullable=True, index=True)
     antt_expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     partners: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     branches: Mapped[list[Branch]] = relationship(back_populates="tenant")
+    users: Mapped[list[User]] = relationship(back_populates="tenant")
 
 
 class Branch(Base, TimestampMixin):
@@ -89,7 +93,8 @@ class User(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True)
-    email: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    email: Mapped[str] = mapped_column(EncryptedText("users.email"), unique=True, index=True)
+    login: Mapped[str | None] = mapped_column(EncryptedText("users.login"), unique=True, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(120))
     # Perfil RBAC (ver core.permissions.Role)
     role: Mapped[str] = mapped_column(String(40), default="motorista")
@@ -98,11 +103,13 @@ class User(Base, TimestampMixin):
     permissions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     auth_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     navigation_layout: Mapped[str] = mapped_column(String(20), default="sidebar", server_default="sidebar")
 
+    tenant: Mapped[Tenant | None] = relationship(back_populates="users")
     branch: Mapped[Branch | None] = relationship(back_populates="users")
 
 
@@ -187,6 +194,32 @@ class Customer(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class RouteOrigin(Base, TimestampMixin):
+    """Centro de distribuição/origem informado na coluna V da Gestão Adimax."""
+    __tablename__ = "route_origins"
+    __table_args__ = (UniqueConstraint("tenant_id", "address", name="uq_route_origin_tenant_address"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    address: Mapped[str] = mapped_column(String(255))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class DeliveryDestination(Base, TimestampMixin):
+    """Endereço de entrega reutilizável de um cliente final."""
+    __tablename__ = "delivery_destinations"
+    __table_args__ = (UniqueConstraint("customer_id", "address", "number", "district", "city", name="uq_customer_destination"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
+    label: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    address: Mapped[str] = mapped_column(String(255))
+    number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    district: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Driver(Base, TimestampMixin):
     __tablename__ = "drivers"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -195,18 +228,18 @@ class Driver(Base, TimestampMixin):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     carrier_id: Mapped[int | None] = mapped_column(ForeignKey("carriers.id"), nullable=True)
     name: Mapped[str] = mapped_column(String(120))
-    document: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    email: Mapped[str | None] = mapped_column(String(180), nullable=True)
-    address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    document: Mapped[str | None] = mapped_column(EncryptedText("drivers.document"), nullable=True)
+    phone: Mapped[str | None] = mapped_column(EncryptedText("drivers.phone"), nullable=True)
+    email: Mapped[str | None] = mapped_column(EncryptedText("drivers.email"), nullable=True)
+    address: Mapped[str | None] = mapped_column(EncryptedText("drivers.address"), nullable=True)
     city: Mapped[str | None] = mapped_column(String(120), nullable=True)
     state: Mapped[str | None] = mapped_column(String(2), nullable=True)
-    postal_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    postal_code: Mapped[str | None] = mapped_column(EncryptedText("drivers.postal_code"), nullable=True)
     birth_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    cnh_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    cnh_number: Mapped[str | None] = mapped_column(EncryptedText("drivers.cnh_number"), nullable=True, index=True)
     cnh_category: Mapped[str | None] = mapped_column(String(10), nullable=True)
     cnh_expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
-    antt_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    antt_number: Mapped[str | None] = mapped_column(EncryptedText("drivers.antt_number"), nullable=True, index=True)
     antt_expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     registration_updated_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     document_attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), nullable=True)
@@ -221,6 +254,14 @@ class Driver(Base, TimestampMixin):
     expenses: Mapped[list["Expense"]] = relationship(back_populates="driver")
     document_attachment: Mapped["Attachment | None"] = relationship(foreign_keys=[document_attachment_id])
     cnh_attachment: Mapped["Attachment | None"] = relationship(foreign_keys=[cnh_attachment_id])
+
+
+class DriverBranch(Base):
+    __tablename__ = "driver_branches"
+    __table_args__ = (UniqueConstraint("driver_id", "branch_id", name="uq_driver_branch"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id", ondelete="CASCADE"), index=True)
+    branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id", ondelete="CASCADE"), index=True)
 
 
 class DriverSettings(Base, TimestampMixin):
@@ -239,17 +280,17 @@ class VehicleOwner(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
     name: Mapped[str] = mapped_column(String(160))
-    document: Mapped[str] = mapped_column(String(40), index=True)
+    document: Mapped[str] = mapped_column(EncryptedText("vehicle_owners.document"), index=True)
     person_type: Mapped[str] = mapped_column(String(20), default="pessoa_fisica")
-    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    email: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    phone: Mapped[str | None] = mapped_column(EncryptedText("vehicle_owners.phone"), nullable=True)
+    email: Mapped[str | None] = mapped_column(EncryptedText("vehicle_owners.email"), nullable=True)
     address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     bank_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    bank_agency: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    bank_account: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    bank_agency: Mapped[str | None] = mapped_column(EncryptedText("vehicle_owners.bank_agency"), nullable=True)
+    bank_account: Mapped[str | None] = mapped_column(EncryptedText("vehicle_owners.bank_account"), nullable=True)
     bank_account_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     pix_key_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    pix_key: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    pix_key: Mapped[str | None] = mapped_column(EncryptedText("vehicle_owners.pix_key"), nullable=True)
     is_tenant_company: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -267,8 +308,8 @@ class Vehicle(Base, TimestampMixin):
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("vehicle_owners.id"), nullable=True, index=True)
     carrier_id: Mapped[int | None] = mapped_column(ForeignKey("carriers.id"), nullable=True, index=True)
     freight_receiver_type: Mapped[str] = mapped_column(String(20), default="proprietario", index=True)
-    renavam: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
-    chassis: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    renavam: Mapped[str | None] = mapped_column(EncryptedText("vehicles.renavam"), nullable=True, index=True)
+    chassis: Mapped[str | None] = mapped_column(EncryptedText("vehicles.chassis"), nullable=True)
     registry_state: Mapped[str | None] = mapped_column(String(2), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(80), nullable=True)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -286,7 +327,7 @@ class Vehicle(Base, TimestampMixin):
     crlv_attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), nullable=True)
     temperature_controlled: Mapped[bool] = mapped_column(Boolean, default=False)
     ownership_type: Mapped[str] = mapped_column(String(20), default="proprio", index=True)
-    antt_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    antt_number: Mapped[str | None] = mapped_column(EncryptedText("vehicles.antt_number"), nullable=True, index=True)
     antt_expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -304,10 +345,10 @@ class VehicleChangeRequest(Base, TimestampMixin):
     vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), index=True)
     requested_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     reason: Mapped[str] = mapped_column(Text)
-    requested_renavam: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    requested_renavam: Mapped[str | None] = mapped_column(EncryptedText("vehicle_change_requests.requested_renavam"), nullable=True)
     requested_vehicle_type_id: Mapped[int | None] = mapped_column(ForeignKey("vehicle_types.id"), nullable=True)
     requested_axles: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    previous_renavam: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    previous_renavam: Mapped[str | None] = mapped_column(EncryptedText("vehicle_change_requests.previous_renavam"), nullable=True)
     previous_vehicle_type_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     previous_axles: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
@@ -492,6 +533,7 @@ class Route(Base, TimestampMixin):
     route_date: Mapped[date] = mapped_column(Date)
     origin_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     origin_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    origin_id: Mapped[int | None] = mapped_column(ForeignKey("route_origins.id"), nullable=True)
     driver_id: Mapped[int | None] = mapped_column(ForeignKey("drivers.id"), nullable=True)
     vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id"), nullable=True)
     driver_payment_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
@@ -500,8 +542,6 @@ class Route(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="planejada", index=True)
     planned_departure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     actual_departure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    toll_outbound: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
-    toll_return: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
     km_total_informed: Mapped[float | None] = mapped_column(Float, nullable=True)
     km_outbound_informed: Mapped[float | None] = mapped_column(Float, nullable=True)
     km_return_informed: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -519,26 +559,50 @@ class Route(Base, TimestampMixin):
     excluded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # excluída da visão do tenant
     km_source: Mapped[str] = mapped_column(String(20), default="informado")  # informado | calculado
     raw_import_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Resultado da roteirização automática (Maestro/GraphHopper).
+    routing_status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | optimized | error
+    routing_distance_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    routing_duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    routing_optimized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    routing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_geometry_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggested_geometry_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    spreadsheet_route: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    driver_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    vehicle_profile_sent: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    vehicle_profile_requested: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    typology_view: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    overnight: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    overnight_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    daily_count: Mapped[float | None] = mapped_column(Float, nullable=True)
+    daily_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    administrative_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    helper_requested: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    helper_sent: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    load_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cte_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    empty_truck_photo_attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), nullable=True)
+    loaded_return_photo_attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), nullable=True)
 
     stops: Mapped[list[RouteStop]] = relationship(back_populates="route", cascade="all, delete-orphan")
+    empty_truck_photo: Mapped["Attachment | None"] = relationship(foreign_keys=[empty_truck_photo_attachment_id])
+    loaded_return_photo: Mapped["Attachment | None"] = relationship(foreign_keys=[loaded_return_photo_attachment_id])
     events: Mapped[list[RouteEvent]] = relationship(back_populates="route", cascade="all, delete-orphan")
-    tolls: Mapped[list["RouteToll"]] = relationship(back_populates="route", cascade="all, delete-orphan")
+    observations: Mapped[list["RouteObservation"]] = relationship(back_populates="route", cascade="all, delete-orphan", order_by="RouteObservation.sequence")
     dock_session: Mapped[DockSession | None] = relationship(
         back_populates="route", uselist=False, cascade="all, delete-orphan"
     )
 
 
-class RouteToll(Base):
-    """Lançamento individual de pedágio (ida ou volta) informado durante a rota."""
-    __tablename__ = "route_tolls"
+class RouteObservation(Base, TimestampMixin):
+    __tablename__ = "route_observations"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     route_id: Mapped[int] = mapped_column(ForeignKey("routes.id"), index=True)
-    direction: Mapped[str] = mapped_column(String(10))  # ida | volta
-    amount: Mapped[float] = mapped_column(Numeric(10, 2))
-    recorded_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    route: Mapped[Route] = relationship(back_populates="tolls")
+    sequence: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    route: Mapped["Route"] = relationship(back_populates="observations")
 
 
 class RouteStop(Base, TimestampMixin):
@@ -546,6 +610,10 @@ class RouteStop(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     route_id: Mapped[int] = mapped_column(ForeignKey("routes.id"), index=True)
     sequence: Mapped[int] = mapped_column(Integer, default=1)
+    spreadsheet_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    optimized_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+    destination_id: Mapped[int | None] = mapped_column(ForeignKey("delivery_destinations.id"), nullable=True, index=True)
     customer_name: Mapped[str] = mapped_column(String(160))
     customer_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     city: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -555,6 +623,10 @@ class RouteStop(Base, TimestampMixin):
     weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
     pallets: Mapped[float | None] = mapped_column(Float, nullable=True)
     order_number: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    cte_number: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    customer_notes_2: Mapped[str | None] = mapped_column(Text, nullable=True)
+    customer_notes_3: Mapped[str | None] = mapped_column(Text, nullable=True)
     # pendente | em_rota | entregue | falha | devolvido
     status: Mapped[str] = mapped_column(String(30), default="pendente")
     failure_reason_id: Mapped[int | None] = mapped_column(
@@ -690,15 +762,6 @@ class DeliveryProof(Base):
     stop_id: Mapped[int] = mapped_column(ForeignKey("route_stops.id"), index=True)
     attachment_id: Mapped[int] = mapped_column(ForeignKey("attachments.id"))
     signature_storage_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-
-class Toll(Base):
-    __tablename__ = "tolls"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    route_id: Mapped[int] = mapped_column(ForeignKey("routes.id"), index=True)
-    kind: Mapped[str] = mapped_column(String(20))  # ida | volta
-    amount: Mapped[float] = mapped_column(Numeric(10, 2))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -885,6 +948,17 @@ class TrackingConsent(Base, TimestampMixin):
     terms_version: Mapped[str] = mapped_column(String(20), default="1.0")
 
 
+class AppPermissionConsent(Base, TimestampMixin):
+    """Aceite do termo de câmera, localização e tratamento de evidências do app."""
+    __tablename__ = "app_permission_consents"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    accepted: Mapped[bool] = mapped_column(Boolean, default=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terms_version: Mapped[str] = mapped_column(String(20), default="1.0")
+
+
 class VehiclePosition(Base):
     __tablename__ = "vehicle_positions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -1014,6 +1088,18 @@ class RouteOccurrence(Base, TimestampMixin):
     treatment_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    evidence_attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), nullable=True)
+
+
+class OccurrenceCategory(Base, TimestampMixin):
+    __tablename__ = "occurrence_categories"
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_occurrence_category_tenant_code"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    code: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    system: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class RouteOccurrenceEvent(Base):

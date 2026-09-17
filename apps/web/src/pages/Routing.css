@@ -1,0 +1,67 @@
+.routing-page .routing-search-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(2, minmax(140px, 180px)) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #8b949e;
+  border-radius: 12px;
+  background: var(--surface);
+}
+.routing-search-filters label { display: grid; gap: 5px; min-width: 0; }
+.routing-search-filters input { width: 100%; min-width: 0; box-sizing: border-box; }
+.routing-page .routing-list-frame {
+  position: relative;
+  min-height: 320px;
+  margin: 20px 0 20px 8px;
+  border: 1px solid #8b949e;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.routing-page .routing-list-frame > .routing-list {
+  position: absolute;
+  inset: 0;
+  max-height: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: contain;
+  border: 0;
+}
+.routing-list-frame .routing-list > header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-2);
+}
+.routing-status-tabs {
+  position: sticky;
+  top: 40px;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  background: var(--surface-2);
+  border-bottom: 1px solid #8b949e;
+}
+.routing-status-tabs button {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #8b949e;
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.routing-status-tabs button.active {
+  background: #087f6d;
+  border-color: #087f6d;
+  color: #fff;
+}
+@media (max-width: 900px) {
+  .routing-page .routing-list-frame { height: 360px; min-height: 0; margin: 12px; }
+  .routing-page .routing-search-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .routing-search-filters label:first-child { grid-column: 1 / -1; }
+}

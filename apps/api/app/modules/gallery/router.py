@@ -6,6 +6,7 @@ Não cria tabela nova: consulta Attachment através de quem já referencia cada
 uma (route_stops, expenses, maintenance_orders).
 """
 import io
+import re
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote
@@ -17,11 +18,12 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import Role
-from app.db.models import Attachment, Driver, Expense, MaintenanceOrder, Route, RouteStop, User, Vehicle
+from app.core.permissions import Role, scope_by_branch
+from app.db.models import Attachment, Driver, Expense, MaintenanceOrder, Notification, Route, RouteStop, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services import storage
+from app.services.audit import log
 
 router = APIRouter(prefix="/gallery", tags=["gallery"])
 
@@ -39,9 +41,12 @@ class GalleryItemOut(BaseModel):
     content_type: str | None = None
     url: str
     attachment_id: int
+    evidence_code: str | None = None
 
 
 def _item(kind: str, source_id: int, occurred_at: date, plate: str | None, driver_name: str | None, reference: str | None, attachment: Attachment) -> GalleryItemOut:
+    filename = Path(attachment.storage_key).name.split("-", 1)[-1]
+    match = re.search(r"(ADMX-[A-Z0-9]+-[A-Z0-9]+)", filename, re.I)
     return GalleryItemOut(
         id=f"{kind}_{source_id}_{attachment.id}",
         kind=kind,
@@ -49,23 +54,50 @@ def _item(kind: str, source_id: int, occurred_at: date, plate: str | None, drive
         vehicle_plate=plate,
         driver_name=driver_name,
         reference=reference,
-        filename=Path(attachment.storage_key).name.split("-", 1)[-1],
+        filename=filename,
         content_type=attachment.content_type,
         url=storage.get_presigned_url(attachment.bucket, attachment.storage_key),
         attachment_id=attachment.id,
+        evidence_code=match.group(1).upper() if match else None,
     )
+
+def _remove_route_proof(attachment_id: int, db: Session, user: User, request_new: bool):
+    if user.role != Role.ADMIN_GLOBAL.value:
+        raise HTTPException(403, "Apenas o Administrador Global pode executar esta ação.")
+    row = db.execute(select(RouteStop, Route).join(Route, Route.id == RouteStop.route_id).where(
+        or_(RouteStop.proof_attachment_id == attachment_id, RouteStop.warehouse_return_attachment_id == attachment_id)
+    )).first()
+    attachment = db.get(Attachment, attachment_id)
+    if not row or not attachment:
+        raise HTTPException(404, "Comprovante de rota não encontrado.")
+    stop, route = row
+    if request_new:
+        driver = db.get(Driver, route.driver_id) if route.driver_id else None
+        if not driver or not driver.user_id:
+            raise HTTPException(409, "A rota não possui motorista com acesso ao aplicativo.")
+        db.add(Notification(tenant_id=route.tenant_id,user_id=driver.user_id,title="Nova foto solicitada",body=f"Rota {route.codigo_ut} · parada {stop.sequence or stop.id}: envie um novo comprovante.",channel="app"))
+    if stop.proof_attachment_id == attachment_id: stop.proof_attachment_id = None
+    if stop.warehouse_return_attachment_id == attachment_id: stop.warehouse_return_attachment_id = None
+    log(db,user_id=user.id,action="request_new_photo" if request_new else "delete",entity="route_stop_proof",entity_id=attachment_id,detail=f"Rota {route.codigo_ut}; parada {stop.sequence or stop.id}")
+    bucket,key=attachment.bucket,attachment.storage_key
+    db.delete(attachment);db.commit()
+    try: storage.get_client().remove_object(bucket,key)
+    except Exception: pass
+    return {"ok":True,"requested":request_new}
+
+@router.delete("/{attachment_id}")
+def delete_gallery_file(attachment_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return _remove_route_proof(attachment_id,db,user,False)
+
+@router.post("/{attachment_id}/request-new")
+def request_new_gallery_file(attachment_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return _remove_route_proof(attachment_id,db,user,True)
 
 
 def _attachment_allowed(attachment_id: int, db: Session, user: User) -> bool:
     """Confirma que o anexo pertence a uma origem visível para o usuário."""
     def scoped(stmt, model):
-        if user.role == Role.ADMIN_GLOBAL.value:
-            return stmt
-        if user.branch_id is not None:
-            return stmt.where(model.branch_id == user.branch_id)
-        if user.tenant_id is not None:
-            return stmt.where(model.tenant_id == user.tenant_id)
-        return stmt.where(False)
+        return scope_by_branch(stmt, model.branch_id, user, db)
 
     route_stmt = select(RouteStop.id).join(Route, Route.id == RouteStop.route_id).where(
         or_(RouteStop.proof_attachment_id == attachment_id, RouteStop.warehouse_return_attachment_id == attachment_id)
@@ -108,7 +140,6 @@ def list_gallery(
         raise HTTPException(422, "Tipo de documento inválido.")
     if start and end and start > end:
         raise HTTPException(422, "A data inicial não pode ser posterior à data final.")
-    branch_filter = user.branch_id if user.role != Role.ADMIN_GLOBAL.value else None
     items: list[GalleryItemOut] = []
 
     if kind is None or kind in {"entrega", "devolucao"}:
@@ -118,8 +149,7 @@ def list_gallery(
             .outerjoin(Vehicle, Vehicle.id == Route.vehicle_id)
             .outerjoin(Driver, Driver.id == Route.driver_id)
         )
-        if branch_filter:
-            stmt = stmt.where(Route.branch_id == branch_filter)
+        stmt = scope_by_branch(stmt, Route.branch_id, user, db)
         if plate:
             stmt = stmt.where(Vehicle.plate.ilike(f"%{plate}%"))
         if driver_id:
@@ -140,8 +170,7 @@ def list_gallery(
             .outerjoin(Vehicle, Vehicle.id == Expense.vehicle_id)
             .outerjoin(Driver, Driver.id == Expense.driver_id)
         )
-        if branch_filter:
-            stmt = stmt.where(Expense.branch_id == branch_filter)
+        stmt = scope_by_branch(stmt, Expense.branch_id, user, db)
         if plate:
             stmt = stmt.where(Vehicle.plate.ilike(f"%{plate}%"))
         if driver_id:
@@ -160,8 +189,7 @@ def list_gallery(
     # podem compor um resultado que esteja explicitamente filtrado por motorista.
     if not driver_id and (kind is None or kind in {"manutencao", "orcamento"}):
         stmt = select(MaintenanceOrder, Vehicle.plate).outerjoin(Vehicle, Vehicle.id == MaintenanceOrder.vehicle_id)
-        if branch_filter:
-            stmt = stmt.where(MaintenanceOrder.branch_id == branch_filter)
+        stmt = scope_by_branch(stmt, MaintenanceOrder.branch_id, user, db)
         if plate:
             stmt = stmt.where(Vehicle.plate.ilike(f"%{plate}%"))
         if start:

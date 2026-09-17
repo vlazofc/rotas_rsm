@@ -1,14 +1,15 @@
 """Gestão de usuários, perfis e liberação de acesso (RBAC)."""
 import re
+import secrets
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import Role, require_branch_access, require_roles, require_same_tenant
+from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_roles, require_same_tenant
 from app.core.security import hash_password
-from app.db.models import Branch, RoleProfile, User
+from app.db.models import Branch, Driver, RoleProfile, User
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
@@ -20,17 +21,19 @@ _ADMIN_OR_MANAGER = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)
 
 
 class UserIn(BaseModel):
-    email: EmailStr
+    email: EmailStr | None = None
+    login: str | None = Field(default=None, min_length=3, max_length=80)
     name: str
     role: str = Role.MOTORISTA.value
     branch_id: int | None = None
-    password: str | None = Field(default=None, min_length=8, max_length=72)
     department: str | None = Field(default=None, max_length=80)
     subgroup: str | None = Field(default=None, max_length=80)
     permissions: list[str] = Field(default_factory=list)
 
 
 class UserUpdate(BaseModel):
+    email: EmailStr | None = None
+    login: str | None = Field(default=None, min_length=3, max_length=80)
     name: str | None = None
     role: str | None = None
     branch_id: int | None = None
@@ -38,10 +41,6 @@ class UserUpdate(BaseModel):
     department: str | None = Field(default=None, max_length=80)
     subgroup: str | None = Field(default=None, max_length=80)
     permissions: list[str] | None = None
-
-
-class ResetPasswordIn(BaseModel):
-    new_password: str = Field(min_length=8, max_length=72)
 
 
 class RoleProfileIn(BaseModel):
@@ -74,11 +73,13 @@ class RoleProfileOut(BaseModel):
 class UserOut(BaseModel):
     id: int
     email: EmailStr
+    login: str | None = None
     name: str
     role: str
     branch_id: int | None
     tenant_id: int | None = None
     active: bool
+    must_change_password: bool = False
     blocked: bool = False
     status_reason: str | None = None
     department: str | None = None
@@ -89,11 +90,15 @@ class UserOut(BaseModel):
         from_attributes = True
 
 
+class UserCredentialsOut(UserOut):
+    initial_password: str
+
+
 def _user_out(user: User) -> UserOut:
     return UserOut(
-        id=user.id, email=user.email, name=user.name, role=user.role,
+        id=user.id, email=user.email, login=user.login, name=user.name, role=user.role,
         branch_id=user.branch_id, tenant_id=user.tenant_id, active=user.active, blocked=user.blocked, status_reason=user.status_reason,
-        department=user.department, subgroup=user.subgroup,
+        department=user.department, subgroup=user.subgroup, must_change_password=user.must_change_password,
         permissions=_parse_permissions(user.permissions_json),
     )
 
@@ -104,6 +109,15 @@ def _validate_role_value(value: str) -> None:
             status_code=422,
             detail="Código do perfil deve usar letras minúsculas, números e underscore.",
         )
+
+
+def _normalize_login(value: str | None) -> str | None:
+    login = (value or "").strip().lower()
+    if not login:
+        return None
+    if not re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)+", login):
+        raise HTTPException(status_code=422, detail="O usuário deve seguir o padrão nome.sobrenome, sem espaços ou acentos.")
+    return login
 
 
 def _parse_permissions(value: str | None) -> list[str]:
@@ -139,16 +153,6 @@ def _guard_admin_assignment(actor: User, target_role: str | None) -> None:
     """Só admin_global pode conceder/alterar o perfil admin_global."""
     if target_role == Role.ADMIN_GLOBAL.value and actor.role != Role.ADMIN_GLOBAL.value:
         raise HTTPException(status_code=403, detail="Apenas admin global pode conceder este perfil.")
-
-
-def _default_branch_id(db: Session, tenant_id: int | None) -> int | None:
-    if tenant_id is None:
-        return None
-    return db.scalar(
-        select(Branch.id)
-        .where(Branch.tenant_id == tenant_id, Branch.active.is_(True))
-        .order_by(Branch.id)
-    )
 
 
 @router.get("/roles", dependencies=[Depends(_ADMIN_OR_MANAGER)])
@@ -242,33 +246,45 @@ def delete_role_profile(value: str, db: Session = Depends(get_db), actor: User =
 @router.get("", response_model=list[UserOut], dependencies=[Depends(_ADMIN_OR_MANAGER)])
 def list_users(db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     # Contas técnicas de simulação ("Simular ambiente") não são usuários reais.
-    stmt = select(User).where(
-        ~User.email.like("preview@%.admmendes.internal"), ~User.email.like("preview@%.jm.internal")
-    ).order_by(User.name)
-    if actor.role != Role.ADMIN_GLOBAL.value:
+    stmt = select(User).order_by(User.name)
+    if not has_all_environment_access(actor):
         stmt = stmt.where(User.tenant_id == actor.tenant_id)
-    return [_user_out(row) for row in db.scalars(stmt).all()]
+    rows = db.scalars(stmt).all()
+    return [_user_out(row) for row in rows if not (
+        row.email.startswith("preview@")
+        and row.email.endswith((".admmendes.internal", ".jm.internal"))
+    )]
 
 
-@router.post("", response_model=UserOut, dependencies=[Depends(_ADMIN_OR_MANAGER)])
-def create_user(data: UserIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+@router.post("", response_model=UserCredentialsOut, dependencies=[Depends(_ADMIN_OR_MANAGER)])
+def create_user(data: UserIn, response: Response, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    response.headers["Cache-Control"] = "no-store"
     _ensure_role_exists(db, data.role)
     _guard_admin_assignment(actor, data.role)
-    if db.scalar(select(User).where(User.email == data.email)):
+    login = _normalize_login(data.login)
+    if data.role == Role.MOTORISTA.value and not login:
+        raise HTTPException(status_code=422, detail="Informe o usuário do motorista no padrão nome.sobrenome.")
+    if data.role != Role.MOTORISTA.value and data.email is None:
+        raise HTTPException(status_code=422, detail="Informe o e-mail do usuário.")
+    email = str(data.email).lower() if data.email else f"{login}@acesso.adimax.com.br"
+    if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="Email já cadastrado.")
-    # Não-admin global só pode criar usuários na própria filial.
-    branch_id = data.branch_id if actor.role == Role.ADMIN_GLOBAL.value else actor.branch_id
-    branch_id = branch_id or _default_branch_id(db, actor.tenant_id)
-    if branch_id is None:
-        raise HTTPException(status_code=422, detail="Selecione uma filial para o usuário.")
-    branch = require_branch_access(db, actor, branch_id)
+    if login and db.scalar(select(User).where(User.login == login)):
+        raise HTTPException(status_code=409, detail="Nome de usuário já cadastrado.")
+    branch = require_branch_access(db, actor, data.branch_id) if data.branch_id is not None else None
+    tenant_id = branch.tenant_id if branch else actor.tenant_id
+    if tenant_id is None and data.role != Role.ADMIN_GLOBAL.value:
+        raise HTTPException(status_code=422, detail="Empresa não identificada para o usuário.")
+    initial_password = secrets.token_urlsafe(18)
     user = User(
-        email=data.email,
+        email=email,
+        login=login,
         name=data.name,
         role=data.role,
-        tenant_id=branch.tenant_id,
-        branch_id=branch.id,
-        hashed_password=hash_password(data.password) if data.password else None,
+        tenant_id=tenant_id,
+        branch_id=branch.id if branch else None,
+        hashed_password=hash_password(initial_password),
+        must_change_password=True,
         department=data.department, subgroup=data.subgroup,
         permissions_json=_permissions_text(data.permissions),
     )
@@ -277,7 +293,7 @@ def create_user(data: UserIn, db: Session = Depends(get_db), actor: User = Depen
     log(db, user_id=actor.id, action="create", entity="user", entity_id=user.id)
     db.commit()
     db.refresh(user)
-    return _user_out(user)
+    return UserCredentialsOut(**_user_out(user).model_dump(), initial_password=initial_password)
 
 
 @router.put("/{user_id}", response_model=UserOut, dependencies=[Depends(_ADMIN_OR_MANAGER)])
@@ -287,16 +303,41 @@ def update_user(user_id: int, data: UserUpdate,
     if user is None:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
     require_same_tenant(actor, user.tenant_id)
+    _guard_admin_assignment(actor, user.role)
     updates = data.model_dump(exclude_unset=True)
+    if "login" in updates:
+        login = _normalize_login(data.login)
+        if user.role == Role.MOTORISTA.value and not login:
+            raise HTTPException(status_code=422, detail="Informe o usuário do motorista.")
+        if login and db.scalar(select(User).where(User.login == login, User.id != user.id)):
+            raise HTTPException(status_code=409, detail="Nome de usuário já cadastrado.")
+        user.login = login
     if "active" in updates:
         raise HTTPException(422, "Use a ação de situação para ativar ou desativar o usuário.")
-    before = snapshot(user, list(updates))
+    audit_updates = dict(updates)
+    if "permissions" in audit_updates:
+        audit_updates["permissions_json"] = _permissions_text(data.permissions)
+        audit_updates.pop("permissions")
+    before = snapshot(user, list(audit_updates))
     if data.role is not None:
         _ensure_role_exists(db, data.role)
         _guard_admin_assignment(actor, data.role)
+        linked_driver = db.scalar(select(Driver).where(Driver.user_id == user.id))
+        if linked_driver is not None and data.role != Role.MOTORISTA.value:
+            raise HTTPException(
+                status_code=422,
+                detail="Este usuário está vinculado a um motorista e deve permanecer com o perfil Motorista. Desvincule o acesso no cadastro do motorista antes de alterar o perfil.",
+            )
         if user.role == Role.ADMIN_GLOBAL.value and actor.role != Role.ADMIN_GLOBAL.value:
             raise HTTPException(status_code=403, detail="Sem permissão para alterar um admin global.")
         user.role = data.role
+    normalized_email = str(data.email).lower() if data.email is not None else None
+    if normalized_email is not None and normalized_email != user.email:
+        if actor.role != Role.ADMIN_GLOBAL.value:
+            raise HTTPException(status_code=403, detail="Apenas o Admin Global pode alterar o e-mail de login.")
+        if db.scalar(select(User).where(User.email == normalized_email, User.id != user.id)):
+            raise HTTPException(status_code=409, detail="E-mail já cadastrado para outro usuário.")
+        user.email = normalized_email
     if data.name is not None:
         user.name = data.name
     if "department" in updates:
@@ -305,16 +346,16 @@ def update_user(user_id: int, data: UserUpdate,
         user.subgroup = data.subgroup
     if data.permissions is not None:
         user.permissions_json = _permissions_text(data.permissions)
-    if data.branch_id is not None:
-        # Não-admin global não pode mover usuários para outra filial.
-        branch = require_branch_access(db, actor, data.branch_id)
-        user.branch_id = branch.id
-        user.tenant_id = branch.tenant_id
+    if "branch_id" in updates:
+        branch = require_branch_access(db, actor, data.branch_id) if data.branch_id is not None else None
+        user.branch_id = branch.id if branch else None
+        if branch:
+            user.tenant_id = branch.tenant_id
     if data.active is not None:
         if user.id == actor.id and data.active is False:
             raise HTTPException(status_code=400, detail="Não é possível desativar a própria conta.")
         user.active = data.active
-    log_update(db, user_id=actor.id, entity="user", entity_id=user.id, before=before, obj=user, updates=updates)
+    log_update(db, user_id=actor.id, entity="user", entity_id=user.id, before=before, obj=user, updates=audit_updates)
     db.commit()
     db.refresh(user)
     return _user_out(user)
@@ -330,19 +371,46 @@ def change_user_status(user_id:int,data:StatusChangeIn,db:Session=Depends(get_db
     apply_status(db,obj=user,data=data,user_id=actor.id,entity="user");user.auth_version += 1;db.commit();db.refresh(user);return _user_out(user)
 
 
-@router.post("/{user_id}/reset-password", response_model=UserOut,
+@router.post("/{user_id}/repair-driver-access", response_model=UserOut,
+             dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL))])
+def repair_driver_access(user_id: int, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    """Restaura perfil e escopo de uma conta que já possui vínculo operacional."""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "Usuário não encontrado.")
+    driver = db.scalar(select(Driver).where(Driver.user_id == user.id))
+    if driver is None:
+        raise HTTPException(409, "Usuário sem cadastro de motorista vinculado.")
+    before = snapshot(user, ["role", "tenant_id", "branch_id", "auth_version"])
+    user.role = Role.MOTORISTA.value
+    user.tenant_id = driver.tenant_id
+    user.branch_id = driver.branch_id
+    user.auth_version += 1
+    log_update(
+        db, user_id=actor.id, entity="driver_access_repair", entity_id=user.id,
+        before=before, obj=user,
+        updates={"role": user.role, "tenant_id": user.tenant_id, "branch_id": user.branch_id, "auth_version": user.auth_version},
+    )
+    db.commit(); db.refresh(user)
+    return _user_out(user)
+
+
+@router.post("/{user_id}/reset-password", response_model=UserCredentialsOut,
              dependencies=[Depends(_ADMIN_OR_MANAGER)])
-def reset_password(user_id: int, data: ResetPasswordIn,
+def reset_password(user_id: int, response: Response,
                    db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
+    response.headers["Cache-Control"] = "no-store"
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
     require_same_tenant(actor, user.tenant_id)
     if user.role == Role.ADMIN_GLOBAL.value and actor.role != Role.ADMIN_GLOBAL.value:
         raise HTTPException(status_code=403, detail="Sem permissão para redefinir a senha de um admin global.")
-    user.hashed_password = hash_password(data.new_password)
+    initial_password = secrets.token_urlsafe(18)
+    user.hashed_password = hash_password(initial_password)
+    user.must_change_password = True
     user.auth_version += 1
     log(db, user_id=actor.id, action="reset_password", entity="user", entity_id=user.id)
     db.commit()
     db.refresh(user)
-    return _user_out(user)
+    return UserCredentialsOut(**_user_out(user).model_dump(), initial_password=initial_password)

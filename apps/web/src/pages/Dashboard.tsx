@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import api from "../services/api";
+import { appAlert } from "../components/AppDialog";
 import { usePolling } from "../hooks/usePolling";
 
-const REFRESH_INTERVAL_MS = 30000;
+const REFRESH_INTERVAL_MS = 5000;
 
 type PeriodFilter = "day" | "week" | "month";
 type RouteFilter = "open" | "closed" | "all";
@@ -35,13 +36,6 @@ interface LoadPoint {
   paletes: number;
 }
 
-interface TollPoint {
-  label: string;
-  ida: number;
-  volta: number;
-  total: number;
-}
-
 interface DashboardSummary {
   rotas_total: number;
   rotas_abertas: number;
@@ -57,13 +51,11 @@ interface DashboardSummary {
   media_entregas_por_rota: number;
   peso_total_kg: number;
   paletes_total: number;
-  pedagio_total: number;
-  pedagio_ida: number;
-  pedagio_volta: number;
   tempo_medio_doca_min: number | null;
   tempo_medio_carregamento_min: number | null;
   tempo_medio_chegada_liberacao_min: number | null;
   tempo_medio_entre_paradas_min: number | null;
+  tempo_medio_rota_min: number | null;
   entregas_atrasadas: number;
   rotas_aguardando_carregamento: number;
   rotas_em_carregamento: number;
@@ -77,7 +69,6 @@ interface DashboardSummary {
   serie_entregas: SeriesPoint[];
   serie_tempos: TimePoint[];
   serie_carga: LoadPoint[];
-  serie_pedagio: TollPoint[];
 }
 
 export default function Dashboard() {
@@ -150,15 +141,11 @@ export default function Dashboard() {
     return Math.max(1, ...values);
   }, [data]);
 
-  const maxToll = useMemo(() => {
-    const values = data?.serie_pedagio.flatMap((item) => [item.ida, item.volta, item.total]) ?? [1];
-    return Math.max(1, ...values);
-  }, [data]);
-
   return (
     <div>
-      <div className="page-header dashboard-header">
+      <div className="page-header dashboard-header dashboard-hero">
         <div>
+          <span className="dashboard-hero-eyebrow">VISÃO OPERACIONAL</span>
           <h2>{t("dashboard.title")}</h2>
           <p className="page-subtitle">{t("dashboard.subtitle")}</p>
         </div>
@@ -192,14 +179,11 @@ export default function Dashboard() {
             <KpiCard label={t("dashboard.kpi.delivery_success")} value={`${data.taxa_sucesso}%`} detail={t("dashboard.detail.deliveries", { count: data.entregas_sucesso })} tone="success" />
             <KpiCard label={t("dashboard.kpi.delivery_failure")} value={`${data.taxa_insucesso}%`} detail={t("dashboard.detail.occurrences", { count: data.entregas_insucesso })} tone="danger" />
             <KpiCard label={t("dashboard.kpi.total_routes")} value={data.rotas_total} detail={t("dashboard.detail.open_closed", { open: data.rotas_abertas, closed: data.rotas_fechadas })} />
-            <KpiCard label={t("dashboard.kpi.deliveries")} value={data.entregas_total} detail={t("dashboard.detail.late", { count: data.entregas_atrasadas })} tone={data.entregas_atrasadas ? "warning" : "neutral"} />
             <KpiCard label={t("dashboard.kpi.pending")} value={data.entregas_pendentes} detail={t("dashboard.detail.on_route", { count: data.entregas_em_rota })} tone={data.entregas_pendentes ? "warning" : "neutral"} />
             <KpiCard label={t("dashboard.kpi.route_close_rate")} value={`${data.taxa_fechamento_rotas}%`} detail={t("dashboard.detail.closed_routes")} />
             <KpiCard label={t("dashboard.kpi.deliveries_per_route")} value={data.media_entregas_por_rota} detail={t("dashboard.detail.operational_average")} />
-            <KpiCard label={t("dashboard.kpi.toll")} value={formatCurrency(data.pedagio_total, i18n.language)} detail={t("dashboard.detail.toll_split", { outbound: formatCurrency(data.pedagio_ida, i18n.language), return: formatCurrency(data.pedagio_volta, i18n.language) })} />
-            <KpiCard label={t("dashboard.kpi.avg_dock")} value={formatMinutes(data.tempo_medio_doca_min, i18n.language)} detail={t("dashboard.detail.loading")} />
-            <KpiCard label={t("dashboard.kpi.loading_time")} value={formatMinutes(data.tempo_medio_carregamento_min, i18n.language)} detail={t("dashboard.detail.loading_time")} />
-            <KpiCard label={t("dashboard.kpi.arrival_release")} value={formatMinutes(data.tempo_medio_chegada_liberacao_min, i18n.language)} detail={t("dashboard.detail.warehouse_time")} />
+            <KpiCard label="Carregamento" value={formatMinutes(data.tempo_medio_chegada_liberacao_min, i18n.language)} detail="tempo médio no CD" help="Tempo médio entre a chegada ao CD e a liberação. O traço indica ausência de registros completos para calcular a média." />
+            <KpiCard label="Tempo de rota" value={formatMinutes(data.tempo_medio_rota_min, i18n.language)} detail="duração média" help="Tempo médio da saída do CD até a finalização da rota. Considera rotas finalizadas com os horários registrados." />
             <KpiCard label={t("dashboard.kpi.between_stops")} value={formatMinutes(data.tempo_medio_entre_paradas_min, i18n.language)} detail={t("dashboard.detail.between_deliveries")} />
           </section>
 
@@ -296,39 +280,6 @@ export default function Dashboard() {
               ))}
             </div>
             <ChartLegend items={[[t("dashboard.legend.weight"), "bar-weight"], [t("dashboard.legend.pallets"), "bar-pallets"]]} />
-          </section>
-
-          <section className="card-panel dashboard-chart-card chart-wide">
-            <div className="chart-head">
-              <div>
-                <h3>{t("dashboard.charts.toll")}</h3>
-                <p>{t("dashboard.charts.toll_help")}</p>
-              </div>
-            </div>
-            <div className="combo-chart toll-chart">
-              {data.serie_pedagio.map((item) => (
-                <div className="combo-bar" key={item.label}>
-                  <div className="combo-stack" title={t("dashboard.titles.toll", {
-                    label: item.label,
-                    outbound: formatCurrency(item.ida, i18n.language),
-                    return: formatCurrency(item.volta, i18n.language),
-                    total: formatCurrency(item.total, i18n.language),
-                  })}>
-                    <span className="bar-toll-out" style={{ height: `${heightFor(item.ida, maxToll)}%` }}>
-                      <em>{shortCurrency(item.ida, i18n.language)}</em>
-                    </span>
-                    <span className="bar-toll-return" style={{ height: `${heightFor(item.volta, maxToll)}%` }}>
-                      <em>{shortCurrency(item.volta, i18n.language)}</em>
-                    </span>
-                    <span className="bar-toll-total" style={{ height: `${heightFor(item.total, maxToll)}%` }}>
-                      <em>{shortCurrency(item.total, i18n.language)}</em>
-                    </span>
-                  </div>
-                  <small>{item.label}</small>
-                </div>
-              ))}
-            </div>
-            <ChartLegend items={[[t("dashboard.legend.outbound"), "bar-toll-out"], [t("dashboard.legend.return"), "bar-toll-return"], [t("dashboard.legend.total"), "bar-toll-total"]]} />
           </section>
 
           <section className="card-panel dashboard-chart-card">
@@ -450,15 +401,27 @@ function SegmentedControl<T extends string>({ value, labels, onChange }: {
   );
 }
 
-function KpiCard({ label, value, detail, tone = "neutral" }: {
+function KpiCard({ label, value, detail, help, tone = "neutral" }: {
   label: string;
   value: string | number;
   detail: string;
+  help?: string;
   tone?: "neutral" | "success" | "danger" | "warning";
 }) {
+  const { t } = useTranslation();
+  const explanations: Record<string, string> = {
+    [t("dashboard.kpi.delivery_success")]: "Percentual de sucesso nas entregas. Abaixo aparece a quantidade de entregas concluídas com sucesso.",
+    [t("dashboard.kpi.delivery_failure")]: "Percentual de insucesso nas entregas. Abaixo aparece a quantidade de entregas com falha.",
+    [t("dashboard.kpi.total_routes")]: "Quantidade de rotas no período e situação selecionados, com a divisão entre abertas e fechadas.",
+    [t("dashboard.kpi.pending")]: "Quantidade de entregas ainda pendentes. O número abaixo mostra separadamente as entregas em rota.",
+    [t("dashboard.kpi.route_close_rate")]: "Percentual de rotas finalizadas em relação ao total de rotas selecionadas.",
+    [t("dashboard.kpi.deliveries_per_route")]: "Total de entregas dividido pela quantidade de rotas selecionadas.",
+    [t("dashboard.kpi.between_stops")]: "Tempo médio entre os registros de entregas consecutivas. O traço indica que não há registros suficientes para calcular.",
+  };
+  const explanation = help || explanations[label] || `${label}: ${detail}. Valores referentes aos filtros selecionados no painel.`;
   return (
     <div className={`stat-card dashboard-kpi tone-${tone}`}>
-      <div className="stat-label">{label}</div>
+      <div className="stat-label"><span>{label}</span><button type="button" className="kpi-help" title={explanation} aria-label={`Entenda: ${label}`} onClick={() => void appAlert(explanation, {title:label})}>?</button></div>
       <div className="stat-value">{value}</div>
       <div className="kpi-detail">{detail}</div>
     </div>
@@ -512,21 +475,10 @@ function formatNumber(value: number, locale = "pt-BR") {
   return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value);
 }
 
-function formatCurrency(value: number, locale = "pt-BR") {
-  return new Intl.NumberFormat(locale, { style: "currency", currency: locale === "pt-BR" ? "BRL" : "EUR", maximumFractionDigits: 2 }).format(value);
-}
-
 function shortNumber(value: number) {
   if (!value) return "";
   if (value >= 1000) return `${Math.round(value / 1000)}k`;
   return labelFor(value);
-}
-
-function shortCurrency(value: number, locale = "pt-BR") {
-  if (!value) return "";
-  const symbol = locale === "pt-BR" ? "R$" : "€";
-  if (value >= 1000) return `${symbol}${Math.round(value / 1000)}k`;
-  return `${symbol}${formatNumber(value, locale)}`;
 }
 
 function currentWeekValue() {

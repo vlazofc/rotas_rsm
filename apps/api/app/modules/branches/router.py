@@ -3,8 +3,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import Role, require_roles, require_same_tenant
-from app.db.models import Branch, Driver, Route, User, Vehicle
+from app.core.permissions import Role, has_all_environment_access, require_roles, require_same_tenant
+from app.db.models import Branch, Driver, DriverBranch, Route, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
@@ -36,7 +36,7 @@ class BranchOut(BranchIn):
 @router.get("", response_model=list[BranchOut])
 def list_branches(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stmt = select(Branch).order_by(Branch.name)
-    if user.role != Role.ADMIN_GLOBAL.value:
+    if not has_all_environment_access(user):
         stmt = stmt.where(Branch.tenant_id == user.tenant_id)
     return db.scalars(stmt).all()
 
@@ -49,6 +49,8 @@ def create_branch(data: BranchIn, db: Session = Depends(get_db), actor: User = D
     branch = Branch(**data.model_dump(exclude={"tenant_id"}), tenant_id=tenant_id)
     db.add(branch)
     db.flush()
+    driver_ids = db.scalars(select(Driver.id).where(Driver.tenant_id == tenant_id)).all()
+    db.add_all(DriverBranch(driver_id=driver_id, branch_id=branch.id) for driver_id in driver_ids)
     log(db, user_id=actor.id, action="create", entity="branch", entity_id=branch.id)
     db.commit()
     db.refresh(branch)

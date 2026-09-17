@@ -16,13 +16,17 @@ export function usePolling(callback: () => void | Promise<void>, intervalMs: num
     let running = false;
     const schedule = () => {
       if (disposed) return;
+      if (timer) window.clearTimeout(timer);
       const jitter = intervalMs * (0.85 + Math.random() * 0.3);
       timer = window.setTimeout(tick, jitter);
     };
     const tick = async () => {
+      if (disposed || running) return;
+      if (timer) window.clearTimeout(timer);
       if (!running && document.visibilityState === "visible") {
         running = true;
-        try { await callbackRef.current(); } finally { running = false; }
+        try { await callbackRef.current(); } catch { /* A próxima consulta tenta novamente após falhas transitórias. */ } finally { running = false; schedule(); }
+        return;
       }
       schedule();
     };
@@ -31,10 +35,12 @@ export function usePolling(callback: () => void | Promise<void>, intervalMs: num
     };
     schedule();
     document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
     return () => {
       disposed = true;
       if (timer) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
     };
   }, [intervalMs]);
 }

@@ -15,18 +15,18 @@ def ensure_user_scope(user: User, db: Session) -> User:
     """Confirma o escopo no banco em cada requisição; claims do JWT não são autoridade."""
     if user.role == "admin_global":
         return user
-    if user.tenant_id is None or user.branch_id is None:
-        raise HTTPException(status_code=403, detail="Usuário sem empresa ou filial válida.")
+    if user.tenant_id is None:
+        raise HTTPException(status_code=403, detail="Usuário sem empresa válida.")
     tenant = db.get(Tenant, user.tenant_id)
-    branch = db.get(Branch, user.branch_id)
+    branch = db.get(Branch, user.branch_id) if user.branch_id is not None else None
     if tenant is None or not tenant.active:
         raise HTTPException(status_code=403, detail="Empresa inativa ou inexistente.")
-    if branch is None or not branch.active or branch.tenant_id != tenant.id:
+    if user.branch_id is not None and (branch is None or not branch.active or branch.tenant_id != tenant.id):
         raise HTTPException(status_code=403, detail="Filial inativa ou incompatível com a empresa.")
     return user
 
 
-def get_current_user(
+def get_authenticated_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
@@ -52,6 +52,15 @@ def get_current_user(
     return ensure_user_scope(user, db)
 
 
+def get_current_user(user: User = Depends(get_authenticated_user)) -> User:
+    if user.must_change_password:
+        raise HTTPException(status_code=403, detail={
+            "code": "password_change_required",
+            "message": "Defina uma nova senha antes de acessar o sistema.",
+        })
+    return user
+
+
 def get_current_user_optional(
     token: str | None = Depends(oauth2_scheme_optional),
     db: Session = Depends(get_db),
@@ -71,7 +80,7 @@ def get_current_user_optional(
     if user_id is None:
         return None
     user = db.get(User, int(user_id))
-    if user is None or not user.active:
+    if user is None or not user.active or user.must_change_password:
         return None
     if payload.get("auth_version") != user.auth_version:
         return None

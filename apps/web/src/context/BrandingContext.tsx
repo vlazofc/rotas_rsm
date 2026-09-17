@@ -19,20 +19,20 @@ export interface Branding {
 }
 
 const DEFAULTS: Branding = {
-  app_name: null,
-  app_subtitle: null,
-  login_intro_text: null,
-  login_layout: "centered",
-  primary_color: null,
-  sidebar_background_color: null,
-  sidebar_text_color: null,
-  sidebar_active_color: null,
-  enabled_locales: null,
+  app_name: "Adimax",
+  app_subtitle: "Gestão de rotas e entregas",
+  login_intro_text: "Operação logística com rotas, entregas e ocorrências em um só lugar.",
+  login_layout: "institutional",
+  primary_color: "#F9A61A",
+  sidebar_background_color: "#F2F2F2",
+  sidebar_text_color: "#242424",
+  sidebar_active_color: "#F9A61A",
+  enabled_locales: ["pt-BR"],
   topbar_extends_sidebar: true,
-  logo_url: null,
-  logo_rail_url: null,
+  logo_url: "/brand/adimax-logo.png",
+  logo_rail_url: "/brand/adimax-logo.png",
   background_url: null,
-  favicon_url: null,
+  favicon_url: "/brand/adimax-favicon.png",
 };
 
 interface BrandingState {
@@ -51,7 +51,8 @@ export function BrandingProvider({ children }: { children: ReactNode }) {
     try {
       const tenantSlug = new URLSearchParams(window.location.search).get("empresa") || undefined;
       const { data } = await api.get<Branding>("/branding", { params: { tenant_slug: tenantSlug } });
-      setBranding({ ...DEFAULTS, ...data });
+      const definedBranding = Object.fromEntries(Object.entries(data).filter(([, value]) => value != null));
+      setBranding({ ...DEFAULTS, ...definedBranding } as Branding);
     } catch {
       setBranding(DEFAULTS);
     } finally {
@@ -66,7 +67,8 @@ export function BrandingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // Aplica a cor personalizada apenas na barra superior (--blue), preservando
     // a cor de marca do restante do sistema (--brand: botões, menu, gráficos).
-    document.documentElement.style.setProperty("--blue", branding.primary_color || "#2f9bd8");
+    document.documentElement.style.setProperty("--blue", branding.primary_color || "#F9A61A");
+    document.documentElement.style.setProperty("--brand", branding.primary_color || "#F9A61A");
   }, [branding.primary_color]);
 
   useEffect(() => {

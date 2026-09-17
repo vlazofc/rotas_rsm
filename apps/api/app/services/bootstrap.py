@@ -32,7 +32,11 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(80)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS subgroup VARCHAR(80)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions_json TEXT"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS login VARCHAR(80)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_login ON users (login) WHERE login IS NOT NULL"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
+        conn.execute(text("INSERT INTO driver_branches (driver_id, branch_id) SELECT id, branch_id FROM drivers ON CONFLICT (driver_id, branch_id) DO NOTHING"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_type VARCHAR(2) DEFAULT 'PJ'"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS trade_name VARCHAR(160)"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS state_registration VARCHAR(40)"))
@@ -126,7 +130,28 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS sidebar_background_color VARCHAR(20)"))
         conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS sidebar_text_color VARCHAR(20)"))
         conn.execute(text("ALTER TABLE branding_settings ADD COLUMN IF NOT EXISTS sidebar_active_color VARCHAR(20)"))
+        # Migração de identidade deste projeto: remove a identidade anterior.
+        # e deixa os arquivos estáticos oficiais como fonte do logo e favicon.
+        conn.execute(text("""
+            UPDATE branding_settings
+               SET app_name = 'Adimax',
+                   app_subtitle = 'Gestão de rotas e entregas',
+                   login_intro_text = 'Operação logística com rotas, entregas e ocorrências em um só lugar.',
+                   login_layout = 'institutional',
+                   primary_color = '#F9A61A',
+                   sidebar_background_color = '#F2F2F2',
+                   sidebar_text_color = '#242424',
+                   sidebar_active_color = '#F9A61A',
+                   enabled_locales = 'pt-BR',
+                   topbar_extends_sidebar = TRUE,
+                   logo_attachment_id = NULL,
+                   logo_rail_attachment_id = NULL,
+                   background_attachment_id = NULL,
+                   favicon_attachment_id = NULL
+             WHERE app_name IS NULL OR app_name ILIKE ('%Trans ' || 'Adimax%')
+        """))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS navigation_layout VARCHAR(20) DEFAULT 'sidebar'"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS help_assistant_enabled BOOLEAN NOT NULL DEFAULT TRUE"))
         # Campos importados da Torre de Controle (planilha) — routes
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS vehicle_requested VARCHAR(40)"))
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS vehicle_sent VARCHAR(40)"))
@@ -135,6 +160,40 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS km_source VARCHAR(20) DEFAULT 'informado'"))
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS raw_import_json TEXT"))
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS excluded BOOLEAN DEFAULT false"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS routing_status VARCHAR(20) DEFAULT 'pending'"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS routing_distance_km FLOAT"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS routing_duration_minutes INTEGER"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS routing_optimized_at TIMESTAMPTZ"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS routing_error TEXT"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS overnight_count INTEGER"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS cte_number VARCHAR(120)"))
+        conn.execute(text("CREATE TABLE IF NOT EXISTS route_observations (id SERIAL PRIMARY KEY, route_id INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, text TEXT NOT NULL, created_by INTEGER REFERENCES users(id), created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now())"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_route_observations_route_id ON route_observations(route_id)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS routing_geometry_json TEXT"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS suggested_geometry_json TEXT"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS origin_id INTEGER REFERENCES route_origins(id)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS spreadsheet_route VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS delivery_date DATE"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS driver_type VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS vehicle_profile_sent VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS vehicle_profile_requested VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS typology_view VARCHAR(60)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS overnight BOOLEAN"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS daily_count FLOAT"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS daily_value TEXT"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS administrative_notes TEXT"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS helper_requested VARCHAR(40)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS helper_sent VARCHAR(80)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS load_quantity INTEGER"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS spreadsheet_sequence INTEGER"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS optimized_sequence INTEGER"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id)"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS destination_id INTEGER REFERENCES delivery_destinations(id)"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS cte_number VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE route_stops ALTER COLUMN cte_number TYPE VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS customer_notes TEXT"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS customer_notes_2 TEXT"))
+        conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS customer_notes_3 TEXT"))
         # Campos importados da Torre de Controle (planilha) — route_stops
         conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS client_name VARCHAR(160)"))
         conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS invoicing_date DATE"))
@@ -146,6 +205,7 @@ def _add_missing_columns() -> None:
             conn.execute(text(f"ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS {column} INTEGER"))
         conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS delivery_protocol VARCHAR(60)"))
         conn.execute(text("ALTER TABLE route_stops ADD COLUMN IF NOT EXISTS raw_import_json TEXT"))
+        conn.execute(text("ALTER TABLE route_occurrences ADD COLUMN IF NOT EXISTS evidence_attachment_id INTEGER REFERENCES attachments(id)"))
         # Despesas importadas em lote (sem comprovante) — relaxa NOT NULL e adiciona source.
         conn.execute(text("ALTER TABLE expenses ALTER COLUMN attachment_id DROP NOT NULL"))
         conn.execute(text("ALTER TABLE expenses ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'manual'"))
@@ -270,6 +330,7 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS alert_document_days INTEGER DEFAULT 30"))
         conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS tire_warning_mm FLOAT DEFAULT 3"))
         conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS tire_critical_mm FLOAT DEFAULT 1.6"))
+        conn.execute(text("ALTER TABLE operational_settings ADD COLUMN IF NOT EXISTS routing_enabled BOOLEAN DEFAULT TRUE"))
         conn.execute(text("UPDATE operational_settings SET alert_due_days=COALESCE(alert_due_days,3), alert_document_days=COALESCE(alert_document_days,30), tire_warning_mm=COALESCE(tire_warning_mm,3), tire_critical_mm=COALESCE(tire_critical_mm,1.6)"))
         conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS length_m FLOAT"))
         conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS width_m FLOAT"))
@@ -292,6 +353,9 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS kind VARCHAR(20) DEFAULT 'arrendatario'"))
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS driver_payment_amount NUMERIC(12,2)"))
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS driver_payment_notes TEXT"))
+        # Fotos obrigatórias no fechamento da rota: baú vazio e carro carregado com as devoluções.
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS empty_truck_photo_attachment_id INTEGER REFERENCES attachments(id)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS loaded_return_photo_attachment_id INTEGER REFERENCES attachments(id)"))
         # Conta SaaS — plano, mensalidade e vencimento por cliente.
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_plan VARCHAR(60)"))
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS billing_amount NUMERIC(10,2)"))
@@ -443,19 +507,16 @@ def _init_db_locked() -> None:
         # Portugal (scaffold inicial) ou o nome/slug antigo "JM Brasil"
         # (rebranding para Admmendes) — a operação real é 100% Brasil.
         tenant = (
-            db.scalar(select(Tenant).where(Tenant.slug == "jm-portugal"))
+            db.scalar(select(Tenant).where(Tenant.slug == "adimax"))
+            or db.scalar(select(Tenant).where(Tenant.slug == "jm-portugal"))
             or db.scalar(select(Tenant).where(Tenant.slug == "jm-brasil"))
+            or db.scalar(select(Tenant).where(Tenant.slug == "admmendes-brasil"))
         )
-        if tenant is not None:
-            tenant.name, tenant.slug, tenant.country = "Admmendes Brasil", "admmendes-brasil", "BR"
-            logger.info("Tenant migrado para Admmendes Brasil.")
-        else:
-            tenant = db.scalar(select(Tenant).where(Tenant.slug == "admmendes-brasil"))
         if tenant is None:
-            tenant = Tenant(name="Admmendes Brasil", slug="admmendes-brasil", country="BR")
+            tenant = Tenant(name="Adimax", slug="adimax", country="BR")
             db.add(tenant)
             db.flush()
-            logger.info("Tenant Admmendes Brasil criado.")
+            logger.info("Tenant Adimax criado.")
 
         branch = db.scalar(select(Branch).where(Branch.country == "PT"))
         if branch is not None:
@@ -479,7 +540,7 @@ def _init_db_locked() -> None:
         default_financial_categories = {
             "payable": (
                 ("combustivel", "Combustível"), ("manutencao", "Manutenção"),
-                ("pedagio", "Pedágio"), ("limpeza", "Limpeza"),
+                ("limpeza", "Limpeza"),
                 ("diaria_motorista", "Diária de motorista"), ("diaria_ajudante", "Diária de ajudante"),
                 ("frete_transportadora", "Frete de transportadora"), ("diarias_pessoal", "Diárias e pessoal"),
                 ("impostos_taxas", "Impostos e taxas"), ("seguros", "Seguros"),
@@ -537,7 +598,7 @@ def _init_db_locked() -> None:
                     )
                 )
                 logger.info("Admin semente criado: %s", settings.seed_admin_email)
-            elif admin.branch_id is None or db.get(Branch, admin.branch_id) is None:
+            elif admin.branch_id is not None and db.get(Branch, admin.branch_id) is None:
                 admin.branch_id = branch.id
                 admin.tenant_id = tenant.id
 

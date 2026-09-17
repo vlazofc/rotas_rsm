@@ -97,6 +97,67 @@ def send_notification(user_id: int, title: str, body: str = "") -> dict:
     return {"user_id": user_id, "title": title, "delivered": True}
 
 
+@celery_app.task(name="routes.optimize_imported")
+def optimize_imported_routes(route_ids: list[int]) -> dict:
+    """Atualiza mapas após a importação sem bloquear a resposta ao usuário."""
+    from app.db.models import Route
+    from app.db.session import SessionLocal
+    from app.services.routing import optimize_route
+    db = SessionLocal()
+    optimized, errors = 0, []
+    try:
+        for route_id in route_ids:
+            route = db.get(Route, route_id)
+            if route is None or route.status == "finalizada":
+                continue
+            try:
+                result = optimize_route(db, route)
+                db.commit()
+                if result.get("success"):
+                    optimized += 1
+                else:
+                    errors.append({"route_id": route_id, "error": result.get("error")})
+            except Exception as exc:  # uma rota inválida não bloqueia as demais
+                db.rollback()
+                logger.exception("routes.optimize_imported: falha na rota %s", route_id)
+                errors.append({"route_id": route_id, "error": str(exc)[:300]})
+        return {"status": "success", "optimized": optimized, "errors": errors}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="routes.refresh_map")
+def refresh_route_map_task(route_id: int, user_id: int | None = None) -> dict:
+    """Recalcula pontos e trajeto sem manter uma conexão HTTP longa aberta."""
+    from app.db.models import Route, User
+    from app.db.session import SessionLocal
+    from app.services.audit import log
+    from app.services.routing import route_through_stops
+    db = SessionLocal()
+    try:
+        route = db.get(Route, route_id)
+        if route is None:
+            return {"status": "not_found", "route_id": route_id}
+        result = route_through_stops(db, route, optimize=False)
+        if result.get("success"):
+            valid_user_id = user_id if user_id and db.get(User, user_id) else None
+            log(db, user_id=valid_user_id, action="refresh_route_map", entity="route", entity_id=route.id,
+                detail=f"{len(route.stops)} pontos validados no Maestro em segundo plano.")
+        db.commit()
+        return {"status": "success" if result.get("success") else "error", **result}
+    except Exception as exc:
+        db.rollback()
+        route = db.get(Route, route_id)
+        if route is not None:
+            route.routing_status = "error"
+            route.routing_error = "Falha ao atualizar o mapa. Tente novamente."
+            db.commit()
+        logger.exception("routes.refresh_map: falha na rota %s", route_id)
+        return {"status": "error", "route_id": route_id, "error": str(exc)[:300]}
+    finally:
+        db.close()
+
+
 @celery_app.task(name="accounting.research_tax_rules")
 def research_tax_rules_daily() -> dict:
     """Pesquisa alterações; grava somente propostas inativas para aprovação."""

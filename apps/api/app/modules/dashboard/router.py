@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.permissions import Role
+from app.core.permissions import Role, branch_scope_filter, operational_scope, scope_by_branch
 from app.db.models import DeliveryFailureReason, DockSession, Route, RouteEvent, RouteStop, User
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
@@ -27,14 +27,12 @@ def summary(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    cache_key = f"dashboard:v1:{user.tenant_id}:{user.branch_id}:{range}:{status}:{period_ref or '-'}"
+    cache_key = f"dashboard:v4:{user.role}:{operational_scope(user, db).value}:{user.tenant_id}:{user.branch_id}:{range}:{status}:{period_ref or '-'}"
     cached = get_json(cache_key)
     if cached is not None:
         return cached
 
-    branch_filter = []
-    if user.branch_id:
-        branch_filter.append(Route.branch_id == user.branch_id)
+    branch_filter = [branch_scope_filter(Route.branch_id, user, db)]
 
     def count(*conds):
         return db.scalar(select(func.count(Route.id)).where(*branch_filter, *conds)) or 0
@@ -59,9 +57,6 @@ def summary(
     road_deliveries = sum(1 for stop in stops if stop.status == "em_rota")
     total_weight = round(sum(float(stop.weight_kg or 0) for stop in stops), 1)
     total_pallets = round(sum(float(stop.pallets or 0) for stop in stops), 1)
-    total_toll_outbound = round(sum(float(route.toll_outbound or 0) for route in routes), 2)
-    total_toll_return = round(sum(float(route.toll_return or 0) for route in routes), 2)
-    total_toll = round(total_toll_outbound + total_toll_return, 2)
     avg_deliveries_per_route = round(total_deliveries / total_routes, 1) if total_routes else 0
     close_rate = round((sum(1 for route in routes if route.status == "finalizada") / total_routes) * 100, 1) if total_routes else 0
     closed_deliveries = successful_deliveries + failed_deliveries
@@ -74,6 +69,9 @@ def summary(
     avg_cd_release = _avg([item for item in cd_release_times if item is not None])
     avg_loading = _avg([item for item in loading_times if item is not None])
     avg_stop_interval = _avg(stop_intervals)
+    route_times = [_minutes_between(r.actual_departure_at or (r.dock_session.departure_cd_at if r.dock_session else None), r.closed_at)
+                   for r in routes if r.status == "finalizada"]
+    avg_route = _avg([minutes for minutes in route_times if minutes is not None])
 
     avg_dock = db.scalar(
         select(func.avg(DockSession.loading_minutes)).join(Route, Route.id == DockSession.route_id)
@@ -114,9 +112,6 @@ def summary(
         "media_entregas_por_rota": avg_deliveries_per_route,
         "peso_total_kg": total_weight,
         "paletes_total": total_pallets,
-        "pedagio_total": total_toll,
-        "pedagio_ida": total_toll_outbound,
-        "pedagio_volta": total_toll_return,
         "rotas_aguardando_carregamento": count(Route.status == "planejada"),
         "rotas_em_carregamento": count(Route.status == "em_carregamento"),
         "rotas_liberadas": count(Route.status == "liberada"),
@@ -126,6 +121,7 @@ def summary(
         "tempo_medio_carregamento_min": avg_loading,
         "tempo_medio_chegada_liberacao_min": avg_cd_release,
         "tempo_medio_entre_paradas_min": avg_stop_interval,
+        "tempo_medio_rota_min": avg_route,
         "entregas_atrasadas": late,
         "status_rotas": _route_status_breakdown(routes),
         "status_entregas": _delivery_status_breakdown(stops),
@@ -134,9 +130,8 @@ def summary(
         "serie_entregas": _build_delivery_series(routes, bucket_range, start_date, end_date),
         "serie_tempos": _build_time_series(routes, bucket_range, start_date, end_date),
         "serie_carga": _build_load_series(routes, bucket_range, start_date, end_date),
-        "serie_pedagio": _build_toll_series(routes, bucket_range, start_date, end_date),
     }
-    set_json(cache_key, result, 15)
+    set_json(cache_key, result, 2)
     return result
 
 
@@ -305,21 +300,6 @@ def _build_load_series(routes: list[Route], range_name: str, start_date: date | 
     return list(buckets.values())
 
 
-def _build_toll_series(routes: list[Route], range_name: str, start_date: date | None = None, end_date: date | None = None) -> list[dict[str, float | str]]:
-    buckets = {
-        label: {"label": label, "ida": 0.0, "volta": 0.0, "total": 0.0}
-        for label in _build_empty_buckets(date.today(), range_name, start_date, end_date)
-    }
-    for route in routes:
-        label = _bucket_label(route.route_date, range_name)
-        if label not in buckets:
-            continue
-        outbound = float(route.toll_outbound or 0)
-        returning = float(route.toll_return or 0)
-        buckets[label]["ida"] = round(float(buckets[label]["ida"]) + outbound, 2)
-        buckets[label]["volta"] = round(float(buckets[label]["volta"]) + returning, 2)
-        buckets[label]["total"] = round(float(buckets[label]["total"]) + outbound + returning, 2)
-    return list(buckets.values())
 
 
 def _failure_reason_breakdown(db: Session, stops: list[RouteStop]) -> list[dict[str, int | str]]:
@@ -444,8 +424,6 @@ def _stop_close_event_times(events: list[RouteEvent]) -> dict[int, object]:
 @router.get("/map")
 def map_points(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Pontos para o mapa com cor por status (verde/amarelo/vermelho/cinza/azul)."""
-    stmt = select(Route).where(Route.status == "em_rota")
-    if user.branch_id:
-        stmt = stmt.where(Route.branch_id == user.branch_id)
+    stmt = scope_by_branch(select(Route).where(Route.status == "em_rota"), Route.branch_id, user, db)
     routes = db.scalars(stmt).all()
     return [{"route_id": r.id, "codigo_ut": r.codigo_ut, "status": r.status} for r in routes]

@@ -30,6 +30,9 @@ dist/
 # IDE / SO
 .vscode/
 .idea/
+.gradle/
+local.properties
+**/build/
 .DS_Store
 Thumbs.db
 

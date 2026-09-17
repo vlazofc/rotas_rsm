@@ -1,0 +1,2 @@
+# Scripts executados na VPS Linux precisam de quebras de linha LF.
+*.sh text eol=lf

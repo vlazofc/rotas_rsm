@@ -25,11 +25,12 @@ services:
     container_name: rotas_cloudflared
     profiles: ["cloudflare"]
     restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN_ROTAS}
     depends_on:
       - proxy
-    networks:
-      - internal
+    # O hostname público deste túnel foi configurado no painel para
+    # http://localhost:8089. A rede do host faz esse endereço alcançar o Caddy.
+    network_mode: host
 
   # --- Proxy interno (roteia / -> web e /api -> api) ---
   proxy:
@@ -41,7 +42,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     ports:
-      - "127.0.0.1:8089:80"  # acesso local; entrada pública somente pelo tunnel
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:8089:80"  # loopback por padrão; servidor LAN pode definir 0.0.0.0
     depends_on:
       - web
       - api
@@ -136,17 +137,14 @@ services:
     image: postgis/postgis:16-3.4
     container_name: rotas_postgres
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      TZ: ${APP_TIMEZONE}
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5434:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -158,7 +156,9 @@ services:
     image: redis:7-alpine
     container_name: rotas_redis
     restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    env_file:
+      - .env
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
     volumes:
       - redis_data:/data
     ports:
@@ -172,9 +172,8 @@ services:
     container_name: rotas_minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    env_file:
+      - .env
     volumes:
       - minio_data:/data
     ports:

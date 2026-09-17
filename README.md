@@ -1,6 +1,6 @@
-# Rotas Brasil RSM
+# Trans Adimax — Gestão de Rotas
 
-Plataforma operacional de monitoramento de rotas (CD → entregas → devolução) para a filial do Brasil (Santo André - SP).
+Plataforma operacional da Trans Adimax para planejamento e monitoramento de rotas, entregas, falhas e evidências.
 API-first, multilíngue (pt-BR / pt-PT), segura e pronta para evoluir para app Android/iOS.
 
 ## Stack
@@ -20,10 +20,11 @@ API-first, multilíngue (pt-BR / pt-PT), segura e pronta para evoluir para app A
 ## Estrutura
 
 ```
-admmendes-rotas-brasil/
+trans-adimax-rotas/
 ├── apps/
 │   ├── api/         FastAPI (config, security, RBAC, db, módulos, celery)
-│   └── web/         React + Vite (i18n, login, dashboard, rotas)
+│   ├── web/         React + Vite (i18n, login, dashboard, rotas)
+│   └── android-driver/ Aplicativo Android Studio para o motorista
 ├── infra/           Caddyfile + Cloudflare Tunnel
 ├── scripts/         deploy, backup, restore, firewall, init_server
 ├── docs/            arquitetura, banco, fluxo, segurança
@@ -43,6 +44,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 - API: http://localhost:8000/docs
 - MinIO console: http://localhost:9001
 - Login inicial: `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` do `.env`
+- App do motorista: abra `apps/android-driver` no Android Studio.
 
 ## Subir em PRODUÇÃO (VPS Hostinger + Cloudflare Tunnel)
 
@@ -58,7 +60,7 @@ sh scripts/deploy.sh                     # docker compose up -d --build
 
 No painel Cloudflare (ver `infra/cloudflare/README-tunnel.md`):
 - Crie o Tunnel, copie o token para o `.env`.
-- Public hostname `rotas.seudominio.pt` → service `http://proxy:80`.
+- Public hostname `jmdistribuicao.com.br` → service `http://proxy:80`.
 - (Opcional) proteja o hostname também com Cloudflare Access.
 
 ## Como tudo conecta por `.env`

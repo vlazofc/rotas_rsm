@@ -12,6 +12,7 @@ export interface CurrentUser {
   subgroup?: string | null;
   permissions?: string[];
   navigation_layout?: "sidebar" | "top";
+  must_change_password: boolean;
 }
 
 interface AuthState {
@@ -54,7 +55,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!user) return false;
     // admin_global passa em tudo (espelha a regra do backend)
     if (user.role === "admin_global") return true;
-    return roles.includes(user.role);
+    const equivalents: Record<string,string> = {
+      admin_site: "gestor_brasil", gerente: "gestor_brasil", lider: "operador_logistico",
+      planejamento: "operador_logistico", monitoramento: "torre_controle",
+    };
+    return roles.includes(user.role) || roles.includes(equivalents[user.role]);
   }
 
   function hasPermission(permission: string, ...fallbackRoles: string[]) {

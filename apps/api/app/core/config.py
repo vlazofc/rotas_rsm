@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
     # App
-    app_name: str = "Rotas Brasil RSM"
+    app_name: str = "Adimax"
     app_env: str = "production"
     app_debug: bool = False
     app_timezone: str = "America/Sao_Paulo"
@@ -51,18 +51,22 @@ class Settings(BaseSettings):
     # Chave exclusiva para cifrar credenciais de integrações. Se vazia, deriva do
     # JWT_SECRET para compatibilidade; em produção, configure uma chave distinta.
     integration_encryption_key: str = ""
+    # Chave mantida também em mídia externa. Protege dados pessoais no banco e backups.
+    data_encryption_key: str = ""
 
     auth_mode: str = "local"
 
     max_upload_mb: int = 25
 
     # Seed admin
-    seed_admin_email: str = "admin@admmendes.com.br"
+    seed_admin_email: str = "admin@jmdistribuicao.com.br"
     seed_admin_password: str = "trocar_admin_senha"
     seed_admin_name: str = "Administrador Global"
 
     # Pesquisa diária de alterações tributárias (Groq Compound + web search).
     groq_api_key: str = ""
+    help_groq_api_key: str = ""
+    help_groq_model: str = "openai/gpt-oss-120b"
     groq_model: str = "groq/compound"
     # Motor isolado do Agente Executivo. EPORTS é mantido por compatibilidade
     # com o nome da variável já adotado no ambiente deste projeto.
@@ -132,6 +136,8 @@ class Settings(BaseSettings):
             raise ValueError(f"Configuração insegura em produção: {', '.join(invalid)}")
         if len(self.jwt_secret.strip()) < 32:
             raise ValueError("JWT_SECRET deve ter pelo menos 32 caracteres em produção.")
+        if len(self.data_encryption_key.strip()) < 32:
+            raise ValueError("DATA_ENCRYPTION_KEY deve estar configurada em produção.")
         if any(origin.startswith("http://") or "localhost" in origin for origin in self.cors_origins):
             raise ValueError("ALLOWED_ORIGINS de produção deve conter somente origens HTTPS públicas.")
         return self

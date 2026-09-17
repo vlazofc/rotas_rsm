@@ -19,6 +19,7 @@ class OperationalSettingsIn(BaseModel):
     require_warehouse_return_proof: bool = True
     require_failure_reason: bool = True
     require_returned_quantity: bool = True
+    routing_enabled: bool = True
 
 
 class OperationalSettingsOut(OperationalSettingsIn):
@@ -47,7 +48,7 @@ def serialize_operational_settings(row: OperationalSettings) -> OperationalSetti
     return OperationalSettingsOut(**{field: bool(getattr(row, field)) for field in FIELDS})
 
 
-@router.get("", response_model=OperationalSettingsOut)
+@router.get("", response_model=OperationalSettingsOut, dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL))])
 def get_operational_settings(db: Session = Depends(get_db)):
     return serialize_operational_settings(get_or_create_operational_settings(db))
 
@@ -56,7 +57,7 @@ def get_operational_settings(db: Session = Depends(get_db)):
 def update_operational_settings(
     data: OperationalSettingsIn,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)),
+    actor: User = Depends(require_roles(Role.ADMIN_GLOBAL)),
 ):
     row = get_or_create_operational_settings(db)
     before = snapshot(row, FIELDS)
@@ -67,7 +68,7 @@ def update_operational_settings(
     db.refresh(row)
     return serialize_operational_settings(row)
 
-@router.get("/alerts", response_model=AlertSettingsIn)
+@router.get("/alerts", response_model=AlertSettingsIn, dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL,Role.GESTOR_BRASIL))])
 def get_alert_settings(db: Session = Depends(get_db)):
     row=get_or_create_operational_settings(db)
     return AlertSettingsIn(**{field:getattr(row,field) for field in AlertSettingsIn.model_fields})

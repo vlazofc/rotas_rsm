@@ -6,7 +6,9 @@ import { useAuth } from "../context/AuthContext";
 type Driver = {
   id: number;
   branch_id: number;
+  branch_ids: number[];
   name: string;
+  user_id?: number | null;
   employment_type: "proprio" | "agregado";
   daily_rate?: number | null;
   document?: string | null;
@@ -40,8 +42,11 @@ type Settings = {
   registration_alert_days: number;
   statement_release_day: number;
 };
+type Branch = { id:number; name:string; tenant_id:number|null };
+type DriverAccess = { id:number; name:string; login?:string|null; tenant_id?:number|null; branch_id?:number|null; active:boolean; blocked:boolean; linked_driver_id?:number|null };
 const empty = {
   name: "",
+  user_id: "",
   employment_type: "proprio",
   daily_rate: "",
   document: "",
@@ -58,6 +63,7 @@ const empty = {
   antt_number: "",
   antt_expiry_date: "",
   registration_updated_at: new Date().toISOString().slice(0, 10),
+  branch_ids: [] as number[],
 };
 const labels: Record<string, string> = {
   ok: "Em dia",
@@ -87,6 +93,8 @@ export default function Drivers() {
     [query, setQuery] = useState(""),
     [status, setStatus] = useState(""),
     [error, setError] = useState("");
+  const [branches,setBranches]=useState<Branch[]>([]);
+  const [driverAccesses,setDriverAccesses]=useState<DriverAccess[]>([]);
   const canDelete = hasRole("admin_global");
   const load = () =>
     Promise.all([
@@ -98,6 +106,8 @@ export default function Drivers() {
     });
   useEffect(() => {
     load().catch(() => {});
+    api.get<Branch[]>("/branches").then(response=>setBranches(response.data.filter(branch=>user?.tenant_id==null||branch.tenant_id===user.tenant_id))).catch(()=>setBranches([]));
+    api.get<DriverAccess[]>("/drivers/access-options").then(response=>setDriverAccesses(response.data)).catch(()=>setDriverAccesses([]));
   }, []);
   const filtered = useMemo(
     () =>
@@ -134,11 +144,7 @@ export default function Drivers() {
       setEditing("new");
       return;
     }
-    setForm(
-      Object.fromEntries(
-        Object.keys(empty).map((key) => [key, String((row as any)[key] || "")]),
-      ) as typeof empty,
-    );
+    setForm({...empty,...Object.fromEntries(Object.keys(empty).filter(key=>key!=="branch_ids").map((key) => [key, String((row as any)[key] || "")])) as Partial<typeof empty>,branch_ids:row.branch_ids?.length?row.branch_ids:[row.branch_id]});
     setEditing(row);
   }
   async function save(e: FormEvent) {
@@ -146,12 +152,13 @@ export default function Drivers() {
     setError("");
     try {
       const payload = {
-        branch_id: user?.branch_id || 1,
+        branch_id: form.branch_ids[0] || user?.branch_id || 1,
+        branch_ids: branches.filter(branch => branch.tenant_id === user?.tenant_id).map(branch => branch.id),
         ...Object.fromEntries(
-          Object.entries(form).map(([key, value]) => [key, value || null]),
+          Object.entries(form).filter(([key])=>key!=="branch_ids").map(([key, value]) => [key, value || null]),
         ),
-        daily_rate:
-          form.employment_type === "proprio" ? Number(form.daily_rate) : null,
+        daily_rate: null,
+        user_id: form.user_id ? Number(form.user_id) : null,
       };
       const response =
         editing === "new"
@@ -277,7 +284,7 @@ export default function Drivers() {
               </div>
               <div>
                 <h3>{row.name}</h3>
-                <span>{row.employment_type === "agregado" ? "Agregado · por rota" : `Próprio · ${Number(row.daily_rate || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}/dia`}</span>
+                <span>Motorista cadastrado</span>
               </div>
               <span className={`stock-badge ${row.active ? "ok" : row.blocked ? "expired" : ""}`} title={row.status_reason||""}>
                 {row.blocked ? "Bloqueado" : row.active ? "Ativo" : "Inativo"}
@@ -356,18 +363,30 @@ export default function Drivers() {
             onClick={(e) => e.stopPropagation()}
           >
             <h3>{editing === "new" ? "Novo motorista" : "Editar motorista"}</h3>
-            <h4>Vínculo e pagamento</h4>
-            <div className="form-grid">
-              <Field label="Tipo de motorista">
-                <select className="input" value={form.employment_type} onChange={(e) => setForm({ ...form, employment_type: e.target.value })}>
-                  <option value="proprio">Motorista próprio</option>
-                  <option value="agregado">Motorista agregado</option>
-                </select>
-              </Field>
-              {form.employment_type === "proprio" && <Field label="Valor da diária"><input className="input" required type="number" min="0.01" step="0.01" value={form.daily_rate} onChange={(e) => setForm({ ...form, daily_rate: e.target.value })}/></Field>}
-            </div>
+            <h4>Filiais onde pode atuar</h4>
+            <p className="page-subtitle">Disponível automaticamente em todas as filiais da empresa.</p>
             <h4>Dados pessoais e contato</h4>
             <div className="form-grid">
+              <Field label="Acesso no app do motorista">
+                <select
+                  className="input"
+                  value={form.user_id}
+                  onChange={(e) => setForm({ ...form, user_id: e.target.value })}
+                >
+                  <option value="">Sem acesso vinculado</option>
+                  {driverAccesses
+                    .filter(access => {
+                      const selectedTenant = user?.tenant_id;
+                      return selectedTenant == null || access.tenant_id === selectedTenant;
+                    })
+                    .filter(access => !access.linked_driver_id || access.linked_driver_id === (editing === "new" ? undefined : editing.id))
+                    .map(access => (
+                      <option key={access.id} value={access.id} disabled={!access.active || access.blocked}>
+                        {access.name}{access.login ? ` (${access.login})` : ""}{!access.active || access.blocked ? " — indisponível" : ""}
+                      </option>
+                    ))}
+                </select>
+              </Field>
               <Field label="Nome completo">
                 <input
                   className="input"

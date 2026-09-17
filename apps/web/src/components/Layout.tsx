@@ -14,7 +14,7 @@ interface NavItem {
   icon?: string;
   roles?: string[]; // ausente = visível para todos os perfis autenticados
   group?: string;
-  feature?: "feature_financeiro" | "feature_rastreamento"; // exige o serviço ativo no cliente
+  feature?: "feature_rastreamento" | "feature_route_optimization"; // exige o serviço ativo no cliente
   permission?: string;
   fallbackRoles?: string[];
 }
@@ -56,16 +56,6 @@ function GearIcon() {
     <IconSvg>
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </IconSvg>
-  );
-}
-
-function HelpIcon() {
-  return (
-    <IconSvg>
-      <circle cx="12" cy="12" r="10" />
-      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
-      <line x1="12" y1="17" x2="12" y2="17" />
     </IconSvg>
   );
 }
@@ -112,9 +102,6 @@ function NavIcon({ name }: { name: string }) {
 function navIconFor(item: NavItem) {
   const path = item.to;
   if (path === "/") return "dashboard";
-  if (path === "/financial-dashboard") return "chart";
-  if (path === "/calculation-memory") return "calculator";
-  if (path === "/statement" || path === "/my-statement") return "receipt";
   if (path === "/reports") return "report";
   if (path === "/audit") return "audit";
   if (path === "/executive-ai") return "robot";
@@ -124,8 +111,6 @@ function navIconFor(item: NavItem) {
   if (path === "/suppliers") return "supplier";
   if (path === "/carriers") return "link";
   if (path === "/failure-reasons") return "tag";
-  if (path.includes("financial-accounts?type=payable")) return "expense";
-  if (path.includes("financial-accounts?type=receivable")) return "revenue";
   if (path.includes("tab=checklist")) return "clipboard";
   if (path.includes("tab=stock")) return "inventory";
   if (path.includes("tab=tires")) return "tire";
@@ -135,12 +120,6 @@ function navIconFor(item: NavItem) {
   if (path.includes("task") || path.includes("approval")) return "tasks";
   if (path.includes("gallery")) return "gallery";
   if (path.includes("route")) return "route";
-  if (path.includes("financial-dashboard")) return "dashboard";
-  if (path.includes("expenses")) return "expense";
-  if (path.includes("revenues")) return "revenue";
-  if (path.includes("financial-accounts")) return "account";
-  if (path.includes("financeiro") || path.includes("statement")) return "ledger";
-  if (path.includes("calculation-memory")) return "document";
   if (path.includes("drivers") || path.includes("users") || path.includes("profiles")) return "person";
   if (path.includes("vehicles") || path.includes("vehicle-types")) return "vehicle";
   if (path.includes("carriers") || path.includes("suppliers") || path.includes("customers")) return "building";
@@ -158,21 +137,38 @@ export default function Layout({ children }: { children: ReactNode }) {
   const { branding } = useBranding();
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("sidebar_collapsed") === "1");
   const [navigationLayout,setNavigationLayout]=useState<"sidebar"|"top">("sidebar");
-  const [helpOpen, setHelpOpen] = useState(false);
+  const [openTopGroup, setOpenTopGroup] = useState<string | null>(null);
+  const topNavRef = useRef<HTMLElement>(null);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [liveAlerts,setLiveAlerts]=useState<LiveAlert[]>([]);
   const [alertFilter,setAlertFilter]=useState<"all"|"critical"|"warning"|"info">("all");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const notificationsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!notificationsOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !notificationsRef.current?.contains(event.target)) {
+        setNotificationsOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOutside, true);
+    return () => document.removeEventListener("pointerdown", closeOutside, true);
+  }, [notificationsOpen]);
   const [clearingNotifications, setClearingNotifications] = useState(false);
   const [notificationToasts, setNotificationToasts] = useState<AppNotification[]>([]);
   const seenNotificationIds = useRef(new Set<number>());
   const toastTimers = useRef(new Map<number, number>());
-  const [features, setFeatures] = useState({ feature_financeiro: true, feature_rastreamento: true, feature_route_optimization: true, feature_km_calculation: true });
+  const [features, setFeatures] = useState({ feature_rastreamento: true, feature_route_optimization: true, feature_km_calculation: true });
+  const [appConsentRequired, setAppConsentRequired] = useState(false);
+  const [appConsentReady, setAppConsentReady] = useState(false);
+  const [savingAppConsent, setSavingAppConsent] = useState(false);
+  const driverTrackingRoute = useRef<number | null>(null);
+  const driverBrowserWatch = useRef<number | null>(null);
 
   useEffect(() => {
     api.get("/tenants/me")
       .then((r) => setFeatures({
-        feature_financeiro: r.data.feature_financeiro,
         feature_rastreamento: r.data.feature_rastreamento,
         feature_route_optimization: r.data.feature_route_optimization ?? true,
         feature_km_calculation: r.data.feature_km_calculation ?? true,
@@ -180,6 +176,83 @@ export default function Layout({ children }: { children: ReactNode }) {
       .catch(() => {});
   }, []);
   useEffect(()=>{if(user?.navigation_layout)setNavigationLayout(user.navigation_layout)},[user?.navigation_layout]);
+  useEffect(() => {
+    if (user?.role !== "motorista") { setAppConsentRequired(false); return; }
+    setAppConsentReady(false);
+    api.get<{accepted:boolean}>("/tracking/app-permission-consent")
+      .then(({data}) => { setAppConsentRequired(!data.accepted); setAppConsentReady(data.accepted); })
+      .catch(() => { setAppConsentRequired(true); setAppConsentReady(false); });
+  }, [user?.id, user?.role]);
+
+  async function acceptAppPermissions() {
+    setSavingAppConsent(true);
+    try {
+      await api.put("/tracking/app-permission-consent", { accepted: true, terms_version: "1.0" });
+      setAppConsentRequired(false);
+      setAppConsentReady(true);
+      const android = window.AndroidLocation as (typeof window.AndroidLocation & { requestAllPermissions?: () => void }) | undefined;
+      android?.requestAllPermissions?.();
+    } finally {
+      setSavingAppConsent(false);
+    }
+  }
+
+  useEffect(() => {
+    if (user?.role !== "motorista" || !appConsentReady) return;
+    let disposed = false;
+    const stop = (revoke: boolean) => {
+      window.AndroidLocation?.stopLocationUpdates?.();
+      if (driverBrowserWatch.current !== null) navigator.geolocation.clearWatch(driverBrowserWatch.current);
+      driverBrowserWatch.current = null;
+      delete window.onAndroidLocation;
+      const wasActive = driverTrackingRoute.current !== null;
+      driverTrackingRoute.current = null;
+      if (revoke && wasActive) void api.put("/tracking/consent", { accepted: false, terms_version: "1.0" }).catch(() => {});
+    };
+    const start = async (routeId: number) => {
+      if (driverTrackingRoute.current === routeId || disposed) return;
+      stop(false);
+      await api.put("/tracking/consent", { accepted: true, terms_version: "1.0" });
+      if (disposed) return;
+      driverTrackingRoute.current = routeId;
+      const send = (latitude:number,longitude:number,accuracy?:number,speedMps?:number,recordedAt?:string) => void api.post("/tracking/positions", { route_id: routeId, latitude, longitude, accuracy_m: accuracy, speed_kmh: speedMps == null ? null : speedMps * 3.6, recorded_at: recordedAt || undefined }).catch(() => {});
+      window.onAndroidLocation = send;
+      if (window.AndroidLocation) { window.AndroidLocation.startLocationUpdates?.(120000); return; }
+      driverBrowserWatch.current = navigator.geolocation.watchPosition(p => send(p.coords.latitude,p.coords.longitude,p.coords.accuracy,p.coords.speed??undefined),() => {},{enableHighAccuracy:true,maximumAge:15000});
+    };
+    const refresh = async () => {
+      const {data} = await api.get<Array<{id:number;status:string;route_date?:string}>>("/routes");
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+      const active = data.find(route => route.status === "em_rota")
+        ?? data.find(route => route.route_date === today && !["finalizada", "cancelada"].includes(route.status));
+      if (active) await start(active.id); else stop(true);
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 30000);
+    return () => { disposed = true; window.clearInterval(timer); stop(false); };
+  }, [user?.id, user?.role, appConsentReady]);
+  useEffect(() => {
+    setOpenTopGroup(null);
+    setNotificationsOpen(false);
+    setNotificationToasts([]);
+    toastTimers.current.forEach((toastTimer) => window.clearTimeout(toastTimer));
+    toastTimers.current.clear();
+  }, [loc.pathname, loc.search]);
+  useEffect(() => {
+    if (!openTopGroup) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !topNavRef.current?.contains(event.target)) setOpenTopGroup(null);
+    };
+    document.addEventListener("pointerdown", closeOutside, true);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNotificationsOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside, true);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openTopGroup]);
   async function toggleNavigationLayout(){const next=navigationLayout==="sidebar"?"top":"sidebar";setNavigationLayout(next);try{await api.put("/auth/preferences",{navigation_layout:next});await refresh()}catch{setNavigationLayout(navigationLayout)}}
 
   const loadNotifications = () => {
@@ -189,6 +262,9 @@ export default function Layout({ children }: { children: ReactNode }) {
         r.data.forEach((item) => seenNotificationIds.current.add(item.id));
         setNotifications(r.data);
         if (incoming.length) {
+          const nativeAlerts = window.AndroidLocation as (typeof window.AndroidLocation & { showNotification?: (title:string, message:string, notificationId:number) => void }) | undefined;
+          const newest = incoming[0];
+          nativeAlerts?.showNotification?.(newest.title || "Aviso operacional", newest.body || "Há uma nova atualização na sua rota.", newest.id);
           setNotificationToasts((current) => [...incoming, ...current.filter((item) => !incoming.some((next) => next.id === item.id))].slice(0, 3));
           incoming.forEach((item) => {
             const existing = toastTimers.current.get(item.id);
@@ -268,59 +344,24 @@ export default function Layout({ children }: { children: ReactNode }) {
     });
   }
 
-  const helpFaq = [
-    { question: t("rail.help_faq.navigation_q"), answer: t("rail.help_faq.navigation_a") },
-    { question: t("rail.help_faq.dashboard_q"), answer: t("rail.help_faq.dashboard_a") },
-    { question: t("rail.help_faq.routes_q"), answer: t("rail.help_faq.routes_a") },
-    { question: t("rail.help_faq.config_q"), answer: t("rail.help_faq.config_a") },
-    { question: t("rail.help_faq.buttons_q"), answer: t("rail.help_faq.buttons_a") },
-  ];
-
   const allItems: NavItem[] = [
-    // --- Operação ---
-    { to: "/", label: t("nav.dashboard"), group: t("nav.group_operation") },
-    { to: "/tracking", label: "Monitoramento GPS", group: t("nav.group_operation"), feature: "feature_rastreamento" },
-    { to: "/routes", label: t("nav.routes"), group: t("nav.group_operation") },
-    { to: "/occurrences", label: "Ocorrências", group: t("nav.group_operation") },
-    { to: "/tasks", label: "Central de tarefas", group: t("nav.group_operation") },
-    { to: "/my-statement", label: "Meus ganhos e descontos", roles: ["motorista"], group: t("nav.group_operation"), feature: "feature_financeiro" },
-    { to: "/gallery", label: "Galeria e Anexos", roles: ["admin_global", "gestor_brasil", "auditor", "operador_logistico"], group: t("nav.group_operation") },
-
-    // --- Financeiro ---
-    { to: "/financial-dashboard", label: "Dashboard", permission: "finance.view", fallbackRoles: ["gestor_brasil", "gestor_financeiro"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/expenses", label: t("nav.expenses", { defaultValue: "Despesas" }), group: t("nav.group_financeiro", { defaultValue: "Financeiro" }) },
-    { to: "/expense-approvals", label: "Tarefas financeiras", permission: "finance.expense.approve", fallbackRoles: ["gestor_brasil", "gestor_financeiro"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/purchases", label: "Compras", roles: ["admin_global", "gestor_brasil", "gestor_financeiro", "operador_logistico"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/revenues", label: t("nav.revenues", { defaultValue: "Receitas" }), permission: "finance.view", fallbackRoles: ["gestor_brasil", "gestor_financeiro"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/financial-accounts?type=payable", label: "Contas a pagar", permission: "finance.view", fallbackRoles: ["gestor_brasil", "gestor_financeiro"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/financial-accounts?type=receivable", label: "Contas a receber", permission: "finance.view", fallbackRoles: ["gestor_brasil", "gestor_financeiro"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/financeiro", label: "Balancete", permission: "finance.view", fallbackRoles: ["gestor_brasil", "gestor_financeiro"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/calculation-memory", label: "Memória de cálculo", permission: "finance.view", fallbackRoles: ["gestor_brasil", "gestor_financeiro", "auditor"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
-    { to: "/statement", label: "Extrato", permission: "finance.view", fallbackRoles: ["gestor_brasil", "gestor_financeiro"], group: t("nav.group_financeiro", { defaultValue: "Financeiro" }), feature: "feature_financeiro" },
+    // Navegação enxuta da operação JMD.
+    { to: "/", label: t("nav.dashboard"), permission:"module.dashboard", fallbackRoles: ["gestor_brasil", "auditor", "operador_logistico", "torre_controle"], group: t("nav.group_operation") },
+    { to: "/routes", label: t("nav.routes"), permission:"module.routes", fallbackRoles:["gestor_brasil","operador_logistico","torre_controle","motorista","cliente"], group: t("nav.group_operation") },
+    { to: "/routing", label: "Monitoramento de rotas", permission:"module.monitoring", fallbackRoles: ["gestor_brasil","operador_logistico","torre_controle"], group: t("nav.group_operation"), feature: "feature_route_optimization" },
+    { to: "/routing/manual", label: "Roteirização manual", permission:"module.routing", fallbackRoles: ["gestor_brasil","operador_logistico","torre_controle"], group: t("nav.group_operation"), feature: "feature_route_optimization" },
+    { to: "/occurrences", label: "Ocorrências", permission:"module.occurrences", fallbackRoles:["gestor_brasil","operador_logistico","torre_controle","motorista"], group: t("nav.group_operation") },
+    { to: "/gallery", label: "Galeria", permission:"module.gallery", fallbackRoles: ["gestor_brasil","auditor","operador_logistico","torre_controle"], group: t("nav.group_operation") },
+    { to: "/tracking", label: "Acompanhamento", permission:"module.tracking", fallbackRoles:["gestor_brasil","operador_logistico","torre_controle","motorista","cliente"], group: t("nav.group_operation"), feature: "feature_rastreamento" },
 
     // --- Cadastros ---
-    { to: "/config/drivers", label: t("config.tabs.drivers"), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_registers") },
-    { to: "/config/vehicles", label: t("config.tabs.vehicles"), roles: ["admin_global", "gestor_brasil", "operador_logistico", "torre_controle"], group: t("nav.group_registers") },
-    { to: "/vehicle-types", label: t("config.tabs.vehicle_types"), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_registers") },
-    { to: "/carriers", label: t("config.tabs.carriers"), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_registers") },
-    { to: "/suppliers", label: t("config.tabs.providers", { defaultValue: "Fornecedores" }), roles: ["admin_global", "gestor_brasil", "gestor_financeiro", "operador_logistico"], group: t("nav.group_registers") },
-    { to: "/customers", label: t("config.tabs.customers"), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_registers") },
-    { to: "/failure-reasons", label: t("config.tabs.reasons"), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_registers") },
+    { to: "/config/drivers", label: t("config.tabs.drivers"), permission:"module.drivers", fallbackRoles: ["gestor_brasil", "operador_logistico"], group: t("nav.group_registers") },
+    { to: "/config/vehicles", label: t("config.tabs.vehicles"), permission:"module.vehicles", fallbackRoles: ["gestor_brasil", "operador_logistico"], group: t("nav.group_registers") },
 
     // --- Administração ---
-    { to: "/reports", label: t("nav.reports", { defaultValue: "Relatórios" }), roles: ["admin_global", "gestor_brasil", "auditor"], group: t("nav.group_admin") },
-    { to: "/executive-ai", label: "Assistente executivo", roles: ["admin_global", "gestor_brasil", "gestor_financeiro", "auditor", "diretoria"], group: t("nav.group_admin"), feature: "feature_financeiro" },
-    { to: "/profiles", label: t("config.tabs.profiles"), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_admin") },
-    { to: "/config/branding", label: "Configuração", roles: ["admin_global", "gestor_brasil"], group: t("nav.group_admin") },
-    { to: "/users", label: t("nav.users"), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_admin") },
-    { to: "/audit", label: t("nav.audit"), roles: ["admin_global", "gestor_brasil", "auditor"], group: t("nav.group_admin") },
-
-    // --- Frota ---
-    { to: "/fleet-maintenance?tab=orders", label: t("nav.fleet_orders", { defaultValue: "Ordens de serviço" }), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_fleet", { defaultValue: "Frota" }) },
-    { to: "/fleet-maintenance?tab=checklist", label: t("nav.fleet_checklist", { defaultValue: "Checklist" }), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_fleet", { defaultValue: "Frota" }) },
-    { to: "/erp?tab=stock", label: "Estoque", roles: ["admin_global", "gestor_brasil"], group: t("nav.group_fleet", { defaultValue: "Frota" }) },
-    { to: "/fleet-maintenance?tab=tires", label: t("nav.fleet_tires", { defaultValue: "Pneus" }), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_fleet", { defaultValue: "Frota" }) },
-    { to: "/fleet-maintenance?tab=plans", label: t("nav.fleet_plans", { defaultValue: "Manutenções" }), roles: ["admin_global", "gestor_brasil"], group: t("nav.group_fleet", { defaultValue: "Frota" }) },
+    { to: "/reports", label: t("nav.reports", { defaultValue: "Relatórios" }), permission:"module.reports", fallbackRoles:["gestor_brasil","auditor"], group: t("nav.group_admin") },
+    { to: "/users", label: t("nav.users"), permission:"module.users", fallbackRoles:["gestor_brasil"], group: t("nav.group_admin") },
+    { to: "/profiles", label: "Perfis de acesso", roles: ["admin_global"], group: t("nav.group_admin") },
   ];
 
   const items = allItems.filter((i) =>
@@ -331,7 +372,6 @@ export default function Layout({ children }: { children: ReactNode }) {
   const desiredGroupOrder = [
     t("nav.group_operation"),
     t("nav.group_fleet", { defaultValue: "Frota" }),
-    t("nav.group_financeiro", { defaultValue: "Financeiro" }),
     t("nav.group_registers"),
     t("nav.group_admin"),
   ];
@@ -339,6 +379,20 @@ export default function Layout({ children }: { children: ReactNode }) {
 
   return (
     <div className={`app-shell navigation-${navigationLayout}${collapsed ? " is-collapsed" : ""}${branding.topbar_extends_sidebar ? " strip-extended" : ""}`} style={{"--nav-bg":branding.sidebar_background_color||"var(--panel)","--nav-text":branding.sidebar_text_color||"#334155","--nav-active":branding.sidebar_active_color||branding.primary_color||"var(--brand)"} as React.CSSProperties}>
+      {appConsentRequired && <div className="app-consent-backdrop" role="presentation">
+        <section className="app-consent-card" role="dialog" aria-modal="true" aria-labelledby="app-consent-title">
+          <div className="app-consent-brand">ADIMAX · MOTORISTA</div>
+          <h2 id="app-consent-title">Permissões e compartilhamento</h2>
+          <p>Para registrar e comprovar as operações da rota, o aplicativo precisa utilizar os recursos abaixo.</p>
+          <div className="app-consent-items">
+            <article><span>⌖</span><div><strong>Localização e GPS</strong><small>Usados durante a operação para acompanhar a rota, registrar posição, data e hora das evidências.</small></div></article>
+            <article><span>▣</span><div><strong>Câmera e arquivos</strong><small>Usados para fotografar e anexar comprovantes de entrega, falhas e ocorrências.</small></div></article>
+            <article><span>✓</span><div><strong>Registro do aceite</strong><small>Seu aceite, usuário, versão do termo e data/hora ficam armazenados para auditoria.</small></div></article>
+          </div>
+          <p className="app-consent-note">Os dados são utilizados exclusivamente para execução, rastreabilidade e evidência das entregas. As permissões do Android podem ser alteradas nas configurações do aparelho.</p>
+          <button className="btn-primary app-consent-accept" type="button" disabled={savingAppConsent} onClick={() => void acceptAppPermissions()}>{savingAppConsent ? "Registrando aceite…" : "Li e aceito · Continuar"}</button>
+        </section>
+      </div>}
       <div className="icon-rail">
         <button
           type="button"
@@ -349,17 +403,16 @@ export default function Layout({ children }: { children: ReactNode }) {
         >
           {branding.logo_rail_url || branding.logo_url ? (
             <img src={branding.logo_rail_url || branding.logo_url || undefined} alt="" style={{ width: 22, height: 22, objectFit: "contain" }} />
-          ) : (branding.app_name || "Admmendes").slice(0, 2).toUpperCase()}
+          ) : (branding.app_name || "Adimax").slice(0, 2).toUpperCase()}
         </button>
         <nav className="rail-nav" aria-label="Navegação recolhida">
           {items.map((item) => {
             const [itemPath,itemQuery]=item.to.split("?");
             const currentParams=new URLSearchParams(loc.search),itemParams=new URLSearchParams(itemQuery||"");
-            const active=itemQuery?loc.pathname===itemPath&&[...itemParams.entries()].every(([key,value])=>currentParams.get(key)===value):(item.to==="/"?loc.pathname==="/":loc.pathname===item.to||loc.pathname.startsWith(`${item.to}/`));
+            const active=itemQuery?loc.pathname===itemPath&&[...itemParams.entries()].every(([key,value])=>currentParams.get(key)===value):(["/","/routing"].includes(item.to)?loc.pathname===item.to:loc.pathname===item.to||loc.pathname.startsWith(`${item.to}/`));
             return <Link key={item.to} to={item.to} className={`rail-nav-link${active?" is-active":""}`} title={item.label} aria-label={item.label}><NavIcon name={navIconFor(item)}/></Link>;
           })}
         </nav>
-        <button type="button" className="rail-dot rail-help" onClick={() => setHelpOpen(true)} title={t("rail.help")}><HelpIcon /></button>
       </div>
 
       <aside className="sidebar">
@@ -386,7 +439,7 @@ export default function Layout({ children }: { children: ReactNode }) {
                   const itemParams = new URLSearchParams(itemQuery || "");
                   const active = itemQuery
                     ? loc.pathname === itemPath && [...itemParams.entries()].every(([key, value]) => currentParams.get(key) === value)
-                    : (i.to === "/" ? loc.pathname === "/" : loc.pathname === i.to || loc.pathname.startsWith(`${i.to}/`));
+                    : (["/", "/routing"].includes(i.to) ? loc.pathname === i.to : loc.pathname === i.to || loc.pathname.startsWith(`${i.to}/`));
                   return (
                     <Link key={i.to} to={i.to} className={`nav-link${active ? " is-active" : ""}`}>
                       <NavIcon name={navIconFor(i)} />
@@ -414,9 +467,12 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
       </aside>
 
-      {navigationLayout==="top"&&<header className="horizontal-nav">
+      {navigationLayout==="top"&&<header className="horizontal-nav" ref={topNavRef}>
         <Link to="/" className="horizontal-brand">{branding.logo_url&&<img src={branding.logo_url} alt=""/>}<span><strong>{branding.app_name||t("app.title")}</strong><small>{branding.app_subtitle||t("app.subtitle")}</small></span></Link>
-        <nav>{groups.map(group=><div className="horizontal-group" key={group}><button type="button">{group}<span>⌄</span></button><div className="horizontal-dropdown">{items.filter(i=>(i.group??"")===group).map(i=><Link key={i.to} to={i.to}><NavIcon name={navIconFor(i)}/><span>{i.label}</span></Link>)}</div></div>)}</nav>
+        <nav>{groups.map(group=><div className={`horizontal-group${openTopGroup===group?" is-open":""}`} key={group}>
+          <button type="button" aria-expanded={openTopGroup===group} onClick={()=>setOpenTopGroup(current=>current===group?null:group)}>{group}<span>⌄</span></button>
+          <div className="horizontal-dropdown">{items.filter(i=>(i.group??"")===group).map(i=><Link key={i.to} to={i.to} onClick={()=>setOpenTopGroup(null)}><NavIcon name={navIconFor(i)}/><span>{i.label}</span></Link>)}</div>
+        </div>)}</nav>
         <div className="horizontal-user"><strong>{user?.name}</strong><button onClick={logout}>Sair</button></div>
       </header>}
 
@@ -435,19 +491,19 @@ export default function Layout({ children }: { children: ReactNode }) {
             <button type="button" className="navigation-position-toggle" onClick={()=>void toggleNavigationLayout()} title={navigationLayout==="sidebar"?"Mover navegação para o topo":"Mover navegação para a lateral"} aria-label={navigationLayout==="sidebar"?"Mover navegação para o topo":"Mover navegação para a lateral"}>
               {navigationLayout==="sidebar"?<IconSvg><path d="M4 5h16M4 12h16M4 19h16"/><path d="m16 9 4 3-4 3"/></IconSvg>:<IconSvg><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v18M12 8h6m-6 4h6m-6 4h6"/></IconSvg>}
             </button>
-            <div style={{ position: "relative" }}>
-              <button type="button" className={`rail-dot notification-bell ${liveAlerts.some(item=>item.severity==="critical")?"has-critical":""}`} title="Central de alertas" aria-label="Central de alertas" onClick={() => setNotificationsOpen(!notificationsOpen)}>
+            <div ref={notificationsRef} style={{ position: "relative" }}>
+              <button type="button" className={`rail-dot notification-bell ${liveAlerts.some(item=>item.severity==="critical")?"has-critical":""}`} title="Central de alertas" aria-label="Central de alertas" aria-expanded={notificationsOpen} onClick={() => { setNotificationsOpen(open => !open); setNotificationToasts([]); }}>
                 <span aria-hidden="true">🔔</span>
                 {(liveAlerts.length + notifications.filter((n) => !n.read).length) > 0 && <b>{Math.min(liveAlerts.length + notifications.filter((n) => !n.read).length, 99)}</b>}
               </button>
               {notificationsOpen && <div className="alert-center">
-                <header><div><span>MONITORAMENTO</span><h3>Central de alertas</h3></div><div className="alert-center-actions">{(!!notifications.length || !!liveAlerts.length) && <button type="button" onClick={() => void clearNotifications()} disabled={clearingNotifications}>{clearingNotifications ? "Limpando…" : "Limpar notificações"}</button>}<b>{liveAlerts.length + notifications.length}</b></div></header>
+                <header><div><span>MONITORAMENTO</span><h3>Central de alertas</h3></div><div className="alert-center-actions">{(!!notifications.length || !!liveAlerts.length) && <button type="button" onClick={() => void clearNotifications()} disabled={clearingNotifications}>{clearingNotifications ? "Limpando…" : "Limpar notificações"}</button>}<b>{liveAlerts.length + notifications.length}</b><button className="alert-center-close" type="button" aria-label="Fechar central de alertas" onClick={() => setNotificationsOpen(false)}>×</button></div></header>
                 <div className="alert-center-filters">{(["all","critical","warning","info"] as const).map(level=><button key={level} className={alertFilter===level?"active":""} onClick={()=>setAlertFilter(level)}>{level==="all"?"Todos":level==="critical"?"Críticos":level==="warning"?"Atenção":"Informativos"}</button>)}</div>
                 <div className="alert-center-list">{liveAlerts.filter(item=>alertFilter==="all"||item.severity===alertFilter).map(item=><Link className={`alert-center-item ${item.severity}`} to={item.href} key={item.id} onClick={()=>void viewLiveAlert(item)}><i></i><span><small>{item.category}{item.due_date?` · ${new Date(`${item.due_date}T12:00`).toLocaleDateString("pt-BR")}`:""}</small><strong>{item.title}</strong><em>{item.body}</em></span><b>›</b></Link>)}
                   {liveAlerts.filter(item=>alertFilter==="all"||item.severity===alertFilter).length===0&&<div className="alert-center-empty"><span>✓</span><strong>Nenhum alerta nesta categoria</strong><small>Os indicadores estão dentro dos parâmetros atuais.</small></div>}
                   {notifications.map(item=><button className="alert-center-event" key={item.id} onClick={()=>void readNotification(item.id)}><strong>{item.title}</strong><small>{item.body}</small></button>)}
                 </div>
-                <footer><span>Atualização automática a cada 60 segundos</span><Link to="/config/branding" onClick={()=>setNotificationsOpen(false)}>Configurar alertas</Link></footer>
+                <footer><span>Atualização automática a cada 60 segundos</span><span>Somente alertas operacionais</span></footer>
               </div>}
             </div>
             <ThemeToggle />
@@ -463,7 +519,7 @@ export default function Layout({ children }: { children: ReactNode }) {
             <button className="notification-toast-main" type="button" onClick={() => void readNotification(notification.id)}>
               <span className="notification-toast-icon">🔔</span>
               <span className="notification-toast-copy">
-                <small>ROTAS BRASIL RSM · AGORA</small>
+                <small>ADIMAX · AGORA</small>
                 <strong>{notification.title}</strong>
                 {notification.body && <span>{notification.body}</span>}
               </span>
@@ -474,28 +530,6 @@ export default function Layout({ children }: { children: ReactNode }) {
         ))}
       </div>
 
-      {helpOpen && (
-        <div className="modal-backdrop" onClick={() => setHelpOpen(false)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <h3>{t("rail.help_title")}</h3>
-            <p>{t("rail.help_intro")}</p>
-            <div className="help-faq">
-              {helpFaq.map((item) => (
-                <section key={item.question} className="help-faq-item">
-                  <h4>{item.question}</h4>
-                  <p>{item.answer}</p>
-                </section>
-              ))}
-            </div>
-            <p className="help-contact">{t("rail.help_contact")}</p>
-            <div className="modal-actions">
-              <button type="button" className="btn-ghost" onClick={() => setHelpOpen(false)}>
-                {t("common.close")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -3,7 +3,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.core.permissions import require_same_branch
+from app.core.permissions import AccessScope, has_all_environment_access, operational_scope, require_branch_access, require_same_branch
+from app.db.models import Branch
 
 
 BASE = {
@@ -42,3 +43,37 @@ def test_branch_guard_blocks_cross_branch_access():
 def test_global_admin_can_cross_branches():
     user = type("UserStub", (), {"role": "admin_global", "branch_id": None})()
     require_same_branch(user, 11)
+
+
+def test_adimax_tenant_name_does_not_grant_global_access():
+    tenant = type("TenantStub", (), {"slug": "adimax"})()
+    user = type("UserStub", (), {"role": "gerente", "tenant": tenant, "permissions_json": None})()
+    assert has_all_environment_access(user) is False
+
+
+def test_operational_scope_matrix():
+    def user(role, **extra):
+        values = {"role": role, "permissions_json": None, "tenant_id": 1, "branch_id": 10, **extra}
+        return type("UserStub", (), values)()
+
+    assert operational_scope(user("admin_global")) == AccessScope.GLOBAL
+    assert operational_scope(user("gerente")) == AccessScope.TENANT
+    assert operational_scope(user("monitoramento")) == AccessScope.TENANT
+    assert operational_scope(user("operador_logistico")) == AccessScope.BRANCH
+    assert operational_scope(user("motorista")) == AccessScope.ASSIGNED
+    assert operational_scope(user("operador_logistico", permissions_json="scope.tenant")) == AccessScope.TENANT
+
+
+def test_tenant_manager_can_access_another_branch_but_operator_cannot():
+    branch = Branch(id=20, tenant_id=1, name="Filial B", active=True)
+
+    class FakeDb:
+        def get(self, model, value):
+            return branch if model is Branch and value == branch.id else None
+
+    manager = type("UserStub", (), {"role": "gerente", "permissions_json": None, "tenant_id": 1, "branch_id": 10})()
+    operator = type("UserStub", (), {"role": "operador_logistico", "permissions_json": None, "tenant_id": 1, "branch_id": 10})()
+    assert require_branch_access(FakeDb(), manager, branch.id) is branch
+    with pytest.raises(HTTPException) as exc:
+        require_branch_access(FakeDb(), operator, branch.id)
+    assert exc.value.status_code == 403

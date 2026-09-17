@@ -4,11 +4,11 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.permissions import Role, require_branch_access, require_roles, require_same_branch, require_same_tenant
+from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_roles, require_same_tenant
 from app.db.models import Attachment, Carrier, CarrierVehicleLink, Route, Tenant, User, Vehicle, VehicleChangeRequest, VehicleOwner, VehicleType
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
@@ -18,7 +18,7 @@ from app.services.entity_status import StatusChangeIn, apply_status
 
 router = APIRouter(prefix="/vehicles", tags=["vehicles"])
 _MANAGER = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)
-_STAFF = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO, Role.TORRE_CONTROLE)
+_STAFF = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO)
 PROTECTED = {"renavam", "vehicle_type_id", "axles"}
 
 class OwnerIn(BaseModel):
@@ -138,9 +138,11 @@ async def _save_crlv(file: UploadFile, branch_id: int, vehicle_id: int) -> Attac
 @router.get("/owners",response_model=list[OwnerOut],dependencies=[Depends(_STAFF)])
 def list_owners(q:str|None=None,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     stmt=select(VehicleOwner).where(VehicleOwner.tenant_id==actor.tenant_id)
+    rows=db.scalars(stmt.order_by(VehicleOwner.name).limit(250)).all()
     if q and len(q.strip())>=3:
-        term=f"%{q.strip()}%";stmt=stmt.where(or_(VehicleOwner.name.ilike(term),VehicleOwner.document.ilike(term)))
-    return db.scalars(stmt.order_by(VehicleOwner.name).limit(50)).all()
+        term=q.strip().casefold()
+        rows=[row for row in rows if term in row.name.casefold() or term in row.document.casefold()]
+    return rows[:50]
 
 @router.post("/owners",response_model=OwnerOut,dependencies=[Depends(_STAFF)])
 def create_owner(data:OwnerIn,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
@@ -181,15 +183,15 @@ def decide_request(request_id:int,data:DecisionIn,db:Session=Depends(get_db),act
     row=db.get(VehicleChangeRequest,request_id)
     if row is None or row.tenant_id!=actor.tenant_id:raise HTTPException(404,"Solicitação não encontrada.")
     if row.status!="pending":raise HTTPException(409,"Solicitação já decidida.")
-    vehicle=db.get(Vehicle,row.vehicle_id);require_same_branch(actor,vehicle.branch_id)
+    vehicle=db.get(Vehicle,row.vehicle_id);require_branch_access(db,actor,vehicle.branch_id)
     if data.decision=="approved":vehicle.renavam=row.requested_renavam;vehicle.vehicle_type_id=row.requested_vehicle_type_id;vehicle.axles=row.requested_axles
     row.status=data.decision;row.reviewed_by_id=actor.id;row.reviewed_at=datetime.now(timezone.utc);row.decision_note=data.note
     log(db,user_id=actor.id,action=data.decision,entity="vehicle_change_request",entity_id=row.id,detail=data.note);db.commit();db.refresh(row);return _request_out(db,row)
 
-@router.get("",response_model=list[VehicleOut])
+@router.get("",response_model=list[VehicleOut],dependencies=[Depends(_STAFF)])
 def list_vehicles(db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     stmt=select(Vehicle).order_by(Vehicle.plate)
-    if actor.role!=Role.ADMIN_GLOBAL.value:stmt=stmt.where(Vehicle.tenant_id==actor.tenant_id)
+    if not has_all_environment_access(actor):stmt=stmt.where(Vehicle.tenant_id==actor.tenant_id)
     return [_vehicle_out(db,row) for row in db.scalars(stmt).all()]
 
 @router.post("/with-crlv",response_model=VehicleOut,dependencies=[Depends(_STAFF)])
@@ -211,7 +213,7 @@ def request_change(vehicle_id:int,data:ChangeIn,db:Session=Depends(get_db),actor
     if len(data.reason.strip())<10:raise HTTPException(422,"Descreva o motivo da alteração com pelo menos 10 caracteres.")
     vehicle=db.get(Vehicle,vehicle_id)
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
-    require_same_branch(actor,vehicle.branch_id)
+    require_branch_access(db,actor,vehicle.branch_id)
     row=VehicleChangeRequest(branch_id=vehicle.branch_id,vehicle_id=vehicle.id,requested_by_id=actor.id,reason=data.reason.strip(),requested_renavam=data.renavam,requested_vehicle_type_id=data.vehicle_type_id,requested_axles=data.axles,previous_renavam=vehicle.renavam,previous_vehicle_type_id=vehicle.vehicle_type_id,previous_axles=vehicle.axles)
     db.add(row);db.flush();log(db,user_id=actor.id,action="request_change",entity="vehicle",entity_id=vehicle.id,detail=data.reason);db.commit();db.refresh(row);return _request_out(db,row)
 
@@ -219,7 +221,7 @@ def request_change(vehicle_id:int,data:ChangeIn,db:Session=Depends(get_db),actor
 def update_vehicle(vehicle_id:int,data:VehicleUpdate,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     vehicle=db.get(Vehicle,vehicle_id)
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
-    require_same_branch(actor,vehicle.branch_id);updates=data.model_dump(exclude_unset=True);reason=updates.pop("change_reason",None)
+    require_branch_access(db,actor,vehicle.branch_id);updates=data.model_dump(exclude_unset=True);reason=updates.pop("change_reason",None)
     if "active" in updates:raise HTTPException(422,"Use a ação de situação para ativar ou desativar o veículo.")
     ownership_type=updates.get("ownership_type",vehicle.ownership_type)
     if ownership_type not in {"proprio","agregado"}:raise HTTPException(422,"Vínculo do veículo inválido.")
@@ -244,14 +246,14 @@ def update_vehicle(vehicle_id:int,data:VehicleUpdate,db:Session=Depends(get_db),
 def change_vehicle_status(vehicle_id:int,data:StatusChangeIn,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     vehicle=db.get(Vehicle,vehicle_id)
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
-    require_same_branch(actor,vehicle.branch_id);apply_status(db,obj=vehicle,data=data,user_id=actor.id,entity="vehicle");db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
+    require_branch_access(db,actor,vehicle.branch_id);apply_status(db,obj=vehicle,data=data,user_id=actor.id,entity="vehicle");db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
 
 @router.post("/{vehicle_id}/crlv",response_model=VehicleOut,dependencies=[Depends(_STAFF)])
 async def replace_crlv(vehicle_id:int,crlv:UploadFile=File(...),reason:str|None=Form(None),db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     vehicle=db.get(Vehicle,vehicle_id)
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
     if actor.role not in {Role.ADMIN_GLOBAL.value,Role.GESTOR_BRASIL.value} and (not reason or len(reason.strip())<10):raise HTTPException(422,"Informe o motivo da substituição do CRLV com pelo menos 10 caracteres.")
-    require_same_branch(actor,vehicle.branch_id);attachment=await _save_crlv(crlv,vehicle.branch_id,vehicle.id);db.add(attachment);db.flush();vehicle.crlv_attachment_id=attachment.id
+    require_branch_access(db,actor,vehicle.branch_id);attachment=await _save_crlv(crlv,vehicle.branch_id,vehicle.id);db.add(attachment);db.flush();vehicle.crlv_attachment_id=attachment.id
     log(db,user_id=actor.id,action="replace_crlv",entity="vehicle",entity_id=vehicle.id,detail=reason);db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
 
 @router.delete("/{vehicle_id}",dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL))])

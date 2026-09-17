@@ -66,6 +66,14 @@ class StopOut(StopIn):
     qty_ibc: int | None = None
     volumes: int | None = None
     delivery_protocol: str | None = None
+    spreadsheet_sequence: int | None = None
+    optimized_sequence: int | None = None
+    customer_id: int | None = None
+    destination_id: int | None = None
+    cte_number: str | None = None
+    customer_notes: str | None = None
+    customer_notes_2: str | None = None
+    customer_notes_3: str | None = None
 
     class Config:
         from_attributes = True
@@ -108,11 +116,6 @@ class RouteIn(BaseModel):
     driver_payment_amount: float | None = None
     driver_payment_notes: str | None = None
     planned_departure_at: datetime | None = None
-    toll_outbound: float | None = None
-    toll_return: float | None = None
-    km_total_informed: float | None = None
-    km_outbound_informed: float | None = None
-    km_return_informed: float | None = None
     stops: list[StopIn] = Field(default_factory=list)
 
     _v_codigo_ut = field_validator("codigo_ut")(_truncate_codigo_ut)
@@ -130,11 +133,6 @@ class RouteUpdate(BaseModel):
     driver_payment_amount: float | None = None
     driver_payment_notes: str | None = None
     planned_departure_at: datetime | None = None
-    toll_outbound: float | None = None
-    toll_return: float | None = None
-    km_total_informed: float | None = None
-    km_outbound_informed: float | None = None
-    km_return_informed: float | None = None
     vehicle_requested: str | None = None
     vehicle_sent: str | None = None
     helper_assigned: bool | None = None
@@ -145,9 +143,23 @@ class RouteUpdate(BaseModel):
     _v_origin_address = field_validator("origin_address")(_truncate_origin_address)
 
 
-class RouteKmIn(BaseModel):
-    km_outbound_informed: float | None = None
-    km_return_informed: float | None = None
+class RouteAssignmentIn(BaseModel):
+    driver_id: int | None = None
+    vehicle_id: int | None = None
+
+
+class RouteObservationIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class RouteObservationOut(BaseModel):
+    id: int
+    sequence: int
+    text: str
+    created_by: int | None = None
+    created_at: datetime
+    class Config:
+        from_attributes = True
 
 
 class DockOut(BaseModel):
@@ -161,22 +173,6 @@ class DockOut(BaseModel):
     loading_minutes: int | None = None
     waiting_release_minutes: int | None = None
     total_cd_minutes: int | None = None
-
-    class Config:
-        from_attributes = True
-
-
-class RouteTollIn(BaseModel):
-    direction: Literal["ida", "volta"]
-    amount: float
-
-
-class RouteTollOut(BaseModel):
-    id: int
-    direction: str
-    amount: float
-    created_at: datetime
-    recorded_by: int | None = None
 
     class Config:
         from_attributes = True
@@ -207,11 +203,6 @@ class RouteOut(BaseModel):
     status: str
     planned_departure_at: datetime | None
     actual_departure_at: datetime | None
-    toll_outbound: float | None
-    toll_return: float | None
-    km_total_informed: float | None
-    km_outbound_informed: float | None
-    km_return_informed: float | None
     closed_at: datetime | None
     # Campos Fieldeas
     source: str = "manual"
@@ -224,10 +215,38 @@ class RouteOut(BaseModel):
     tracked: bool | None = None
     excluded: bool = False
     km_source: str = "informado"
+    routing_status: str = "pending"
+    routing_distance_km: float | None = None
+    routing_duration_minutes: int | None = None
+    routing_optimized_at: datetime | None = None
+    routing_error: str | None = None
+    routing_geometry_json: str | None = None
+    suggested_geometry_json: str | None = None
+    spreadsheet_route: str | None = None
+    delivery_date: date | None = None
+    driver_type: str | None = None
+    vehicle_profile_sent: str | None = None
+    vehicle_profile_requested: str | None = None
+    typology_view: str | None = None
+    overnight: bool | None = None
+    overnight_count: int | None = None
+    daily_count: float | None = None
+    daily_value: str | None = None
+    administrative_notes: str | None = None
+    helper_requested: str | None = None
+    helper_sent: str | None = None
+    load_quantity: int | None = None
+    cte_number: str | None = None
+    empty_truck_photo_attachment_id: int | None = None
+    empty_truck_photo_filename: str | None = None
+    empty_truck_photo_url: str | None = None
+    loaded_return_photo_attachment_id: int | None = None
+    loaded_return_photo_filename: str | None = None
+    loaded_return_photo_url: str | None = None
     stops: list[StopOut] = Field(default_factory=list)
     dock_session: DockOut | None = None
     events: list[EventOut] = Field(default_factory=list)
-    tolls: list[RouteTollOut] = Field(default_factory=list)
+    observations: list[RouteObservationOut] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -237,6 +256,27 @@ class CheckinIn(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     notes: str | None = None
+
+
+class RouteAdministrativeIn(BaseModel):
+    tracked: bool | None = None
+    helper_assigned: bool | None = None
+    overnight: bool | None = None
+    overnight_count: int | None = Field(default=None, ge=0)
+    daily_count: float | None = Field(default=None, ge=0)
+    daily_value: str | None = None
+    administrative_notes: str | None = None
+    cte_number: str | None = Field(default=None, max_length=120)
+
+
+class StopAdministrativeIn(BaseModel):
+    invoice_number: str | None = None
+    cte_number: str | None = None
+
+
+class StopCustomerNotesIn(BaseModel):
+    customer_notes: str | None = None
+    customer_notes_2: str | None = None
 
 
 class DeliverIn(BaseModel):
@@ -253,6 +293,12 @@ class AdminRouteCorrectionIn(BaseModel):
     status: Literal["planejada", "em_carregamento", "liberada", "em_rota", "finalizada", "cancelada"] | None = None
     reset_dock_flow: bool = False
     reset_all_stops: bool = False
+    arrival_cd_at: datetime | None = None
+    dock_entry_at: datetime | None = None
+    loading_started_at: datetime | None = None
+    loading_finished_at: datetime | None = None
+    operator_released_at: datetime | None = None
+    departure_cd_at: datetime | None = None
     justification: str
 
     @field_validator("justification")

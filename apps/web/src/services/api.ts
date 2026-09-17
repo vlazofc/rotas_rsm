@@ -22,7 +22,7 @@ function getRefreshToken(): string | null {
   return isPreviewMode() ? sessionStorage.getItem("refresh_token") : localStorage.getItem("refresh_token");
 }
 
-function storeTokens(accessToken: string, refreshToken: string) {
+export function storeTokens(accessToken: string, refreshToken: string) {
   const storage = isPreviewMode() ? sessionStorage : localStorage;
   storage.setItem("access_token", accessToken);
   storage.setItem("refresh_token", refreshToken);
@@ -52,6 +52,9 @@ let refreshPromise: Promise<string> | null = null;
 api.interceptors.response.use(
   (r) => r,
   async (error) => {
+    if (error.response?.status === 403 && error.response?.data?.detail?.code === "password_change_required") {
+      if (location.pathname !== "/change-password") location.href = "/change-password";
+    }
     const original = error.config as (typeof error.config & { _retried?: boolean }) | undefined;
     const canRefresh = error.response?.status === 401
       && original
@@ -71,7 +74,11 @@ api.interceptors.response.use(
         const accessToken = await refreshPromise;
         original.headers.Authorization = `Bearer ${accessToken}`;
         return api(original);
-      } catch {
+      } catch (refreshError) {
+        // Falta de rede e indisponibilidade do servidor não invalidam a sessão.
+        if (!axios.isAxiosError(refreshError) || ![400, 401, 403].includes(refreshError.response?.status ?? 0)) {
+          return Promise.reject(refreshError);
+        }
         // A limpeza abaixo encerra a sessão quando o refresh expirou ou foi invalidado.
       }
     }
@@ -91,7 +98,7 @@ api.interceptors.response.use(
 );
 
 export async function login(email: string, password: string) {
-  // /auth/login usa form OAuth2 (username = email)
+  // /auth/login aceita e-mail ou nome de usuário no campo OAuth2 username.
   const form = new URLSearchParams();
   form.set("username", email);
   form.set("password", password);

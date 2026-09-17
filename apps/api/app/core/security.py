@@ -1,7 +1,8 @@
 """Hash de senha e emissão/validação de JWT."""
 from datetime import datetime, timedelta, timezone
 
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError
 from passlib.context import CryptContext
 
 from app.core.config import settings
@@ -45,5 +46,5 @@ def create_refresh_token(subject: str, **claims) -> str:
 def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-    except JWTError as exc:  # noqa: BLE001
+    except PyJWTError as exc:  # noqa: BLE001
         raise ValueError("Token inválido") from exc

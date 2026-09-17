@@ -3,10 +3,10 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import HTTPException
-from sqlalchemy import delete, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
-from app.db.models import AccountingEntry, AccountingLine, AccountingPeriod, ChartAccount, Expense, Revenue, TaxRule
+from app.db.models import AccountingEntry, AccountingLine, AccountingPeriod, ChartAccount, Expense, FinancialAccount, Revenue, TaxRule
 
 DEFAULT_CHART = [
     ("1", "Ativo", "asset", "debit", False), ("1.1", "Ativo circulante", "asset", "debit", False),
@@ -21,6 +21,41 @@ DEFAULT_CHART = [
     ("6", "Tributos e deduções", "expense", "debit", False), ("6.1.01", "Tributos sobre faturamento", "expense", "debit", True),
 ]
 EXPENSE_CODES = {"combustivel":"5.1.01", "manutencao":"5.1.02", "diaria_motorista":"5.1.03", "diaria_ajudante":"5.1.03"}
+
+
+def payable_preview(db: Session, user, end: date, chart: dict[str, ChartAccount]) -> list[dict]:
+    """Project pending payables by due date, without persisting accounting entries."""
+    posted = select(AccountingEntry.id).where(
+        AccountingEntry.tenant_id == FinancialAccount.tenant_id,
+        AccountingEntry.branch_id == FinancialAccount.branch_id,
+        AccountingEntry.status == "posted",
+        or_(
+            and_(AccountingEntry.source_type == "expense", AccountingEntry.source_id == FinancialAccount.expense_id),
+            and_(AccountingEntry.source_type == "financial_account", AccountingEntry.source_id == FinancialAccount.id),
+        ),
+    ).exists()
+    stmt = select(FinancialAccount).where(
+        FinancialAccount.tenant_id == user.tenant_id,
+        FinancialAccount.kind == "payable",
+        FinancialAccount.status == "pendente",
+        FinancialAccount.due_date <= end,
+        ~posted,
+    )
+    if user.role != "admin_global":
+        stmt = stmt.where(FinancialAccount.branch_id == (user.branch_id if user.branch_id is not None else -1))
+    rows = []
+    for title in db.scalars(stmt.order_by(FinancialAccount.due_date, FinancialAccount.id)).all():
+        code = EXPENSE_CODES.get(title.category, "5.1.99")
+        custom = chart.get(title.category)
+        if custom and custom.account_type == "expense" and custom.accepts_entries:
+            code = custom.code
+        amount = _money(title.amount)
+        for account_code, debit, credit in [(code, amount, Decimal("0")), ("2.1.01", Decimal("0"), amount)]:
+            rows.append({"account_id": chart[account_code].id, "entry_id": -title.id,
+                "date": title.due_date, "memo": f"Prévia · {title.description} · {title.counterparty}",
+                "source_type": "financial_account", "source_id": title.id,
+                "debit": debit, "credit": credit, "is_preview": True})
+    return rows
 
 def ensure_default_chart(db: Session, tenant_id: int | None) -> dict[str, ChartAccount]:
     rows = list(db.scalars(select(ChartAccount).where(ChartAccount.tenant_id == tenant_id)).all())
@@ -51,6 +86,8 @@ def post_expense(db:Session, expense:Expense, actor_id:int|None=None)->Accountin
     entry=_new_entry(db,branch_id=expense.branch_id,tenant_id=expense.tenant_id,entry_date=expense.expense_date,memo=f"Despesa #{expense.id} · {expense.reason}",source_type="expense",source_id=expense.id,actor_id=actor_id)
     if entry is None:return None
     chart=ensure_default_chart(db,expense.tenant_id);amount=_money(expense.amount);expense_code=EXPENSE_CODES.get(expense.reason,"5.1.99")
+    custom=chart.get(expense.reason)
+    if custom and custom.account_type=="expense" and custom.accepts_entries: expense_code=custom.code
     db.add_all([AccountingLine(entry_id=entry.id,account_id=chart[expense_code].id,debit=amount,credit=0),AccountingLine(entry_id=entry.id,account_id=chart["2.1.01"].id,debit=0,credit=amount)])
     return entry
 

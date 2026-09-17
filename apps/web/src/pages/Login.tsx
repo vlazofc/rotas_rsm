@@ -22,9 +22,9 @@ export default function Login() {
     setError("");
     setLoading(true);
     try {
-      await login(email, password);
+      const session = await login(email, password);
       await refresh();
-      navigate("/");
+      navigate(session.must_change_password ? "/change-password" : "/");
       reloadBranding();
     } catch {
       setError(t("login.error"));
@@ -69,8 +69,8 @@ export default function Login() {
           <ThemeToggle />
           <LanguageSwitcher />
         </div>
-        <label className="login-label">{t("login.email")}</label>
-        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="username" required
+        <label className="login-label">Usuário ou e-mail</label>
+        <input value={email} onChange={(e) => setEmail(e.target.value)} type="text" autoCapitalize="none" autoComplete="username" required
           className="login-input" />
         <label className="login-label">{t("login.password")}</label>
         <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" required

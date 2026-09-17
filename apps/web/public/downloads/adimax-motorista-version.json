@@ -1,0 +1,7 @@
+{
+  "versionCode": 13,
+  "versionName": "1.3.0",
+  "apkUrl": "https://adimax.jmtransportes.tech/downloads/adimax-log.apk?v=13",
+  "required": false,
+  "message": "Melhoria de estabilidade: mantém a rota aberta e ajusta botões e bordas para a tela do celular."
+}

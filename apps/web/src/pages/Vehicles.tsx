@@ -708,12 +708,6 @@ export default function Vehicles() {
                 <F label="Telefone"><input className="input" value={ownerForm.phone} onChange={(e) => setOwnerForm({ ...ownerForm, phone: e.target.value })} /></F>
                 <F label="E-mail"><input className="input" type="email" value={ownerForm.email} onChange={(e) => setOwnerForm({ ...ownerForm, email: e.target.value })} /></F>
                 <F label="Endereço"><input className="input" value={ownerForm.address} onChange={(e) => setOwnerForm({ ...ownerForm, address: e.target.value })} /></F>
-                <F label="Banco"><input className="input" value={ownerForm.bank_name} onChange={(e) => setOwnerForm({ ...ownerForm, bank_name: e.target.value })} /></F>
-                <F label="Agência"><input className="input" value={ownerForm.bank_agency} onChange={(e) => setOwnerForm({ ...ownerForm, bank_agency: e.target.value })} /></F>
-                <F label="Conta"><input className="input" value={ownerForm.bank_account} onChange={(e) => setOwnerForm({ ...ownerForm, bank_account: e.target.value })} /></F>
-                <F label="Tipo da conta"><select className="input" value={ownerForm.bank_account_type} onChange={(e) => setOwnerForm({ ...ownerForm, bank_account_type: e.target.value })}><option value="corrente">Conta corrente</option><option value="poupanca">Poupança</option><option value="pagamento">Conta pagamento</option></select></F>
-                <F label="Tipo da chave Pix"><select className="input" value={ownerForm.pix_key_type} onChange={(e) => setOwnerForm({ ...ownerForm, pix_key_type: e.target.value })}><option value="cpf_cnpj">CPF/CNPJ</option><option value="email">E-mail</option><option value="telefone">Telefone</option><option value="aleatoria">Chave aleatória</option></select></F>
-                <F label="Chave Pix"><input className="input" value={ownerForm.pix_key} onChange={(e) => setOwnerForm({ ...ownerForm, pix_key: e.target.value })} /></F>
               </div>
               <button type="button" className="btn-primary" onClick={() => void createInlineOwner()}>Cadastrar e vincular</button>
             </section>}
@@ -776,7 +770,7 @@ export default function Vehicles() {
             onSubmit={saveOwner}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="owner-modal-heading"><div><span>CADASTRO DE PROPRIETÁRIO</span><h3>Novo proprietário</h3><p>Informe os dados cadastrais e financeiros para vinculação à frota.</p></div><button type="button" aria-label="Fechar" onClick={()=>setOwnerOpen(false)}>×</button></div>
+            <div className="owner-modal-heading"><div><span>CADASTRO DE PROPRIETÁRIO</span><h3>Novo proprietário</h3><p>Informe os dados cadastrais para vinculação à frota.</p></div><button type="button" aria-label="Fechar" onClick={()=>setOwnerOpen(false)}>×</button></div>
             <section className="owner-form-section"><h4>Tipo de cadastro</h4><div className="owner-person-toggle">
               <button type="button" className={ownerForm.person_type==="pessoa_fisica"?"active":""} onClick={()=>setOwnerForm({...ownerForm,person_type:"pessoa_fisica",document:""})}><strong>CPF</strong><span>Pessoa física</span></button>
               <button type="button" className={ownerForm.person_type==="pessoa_juridica"?"active":""} onClick={()=>setOwnerForm({...ownerForm,person_type:"pessoa_juridica",document:""})}><strong>CNPJ</strong><span>Pessoa jurídica</span></button>
@@ -787,14 +781,6 @@ export default function Vehicles() {
               <F label="Telefone"><input className="input" type="tel" value={ownerForm.phone} onChange={e=>setOwnerForm({...ownerForm,phone:e.target.value})}/></F>
               <F label="E-mail"><input className="input" type="email" value={ownerForm.email} onChange={e=>setOwnerForm({...ownerForm,email:e.target.value})}/></F>
               <label className="field owner-address"><span>Endereço completo</span><input className="input" value={ownerForm.address} onChange={e=>setOwnerForm({...ownerForm,address:e.target.value})}/></label>
-            </div></section>
-            <section className="owner-form-section"><h4>Dados bancários</h4><div className="form-grid">
-              <F label="Banco"><input className="input" placeholder="Nome ou código do banco" value={ownerForm.bank_name} onChange={e=>setOwnerForm({...ownerForm,bank_name:e.target.value})}/></F>
-              <F label="Agência"><input className="input" value={ownerForm.bank_agency} onChange={e=>setOwnerForm({...ownerForm,bank_agency:e.target.value})}/></F>
-              <F label="Conta"><input className="input" value={ownerForm.bank_account} onChange={e=>setOwnerForm({...ownerForm,bank_account:e.target.value})}/></F>
-              <F label="Tipo de conta"><select className="input" value={ownerForm.bank_account_type} onChange={e=>setOwnerForm({...ownerForm,bank_account_type:e.target.value})}><option value="corrente">Conta corrente</option><option value="poupanca">Poupança</option><option value="pagamento">Conta pagamento</option></select></F>
-              <F label="Tipo de chave Pix"><select className="input" value={ownerForm.pix_key_type} onChange={e=>setOwnerForm({...ownerForm,pix_key_type:e.target.value})}><option value="cpf_cnpj">CPF/CNPJ</option><option value="email">E-mail</option><option value="telefone">Telefone</option><option value="aleatoria">Chave aleatória</option></select></F>
-              <F label="Chave Pix"><input className="input" value={ownerForm.pix_key} onChange={e=>setOwnerForm({...ownerForm,pix_key:e.target.value})}/></F>
             </div></section>
             {error&&<p className="modal-error owner-modal-error">{error}</p>}
             <div className="modal-actions">

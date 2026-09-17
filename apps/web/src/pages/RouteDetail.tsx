@@ -45,18 +45,16 @@ interface Dock {
   loading_finished_at?: string | null; operator_released_at?: string | null; departure_cd_at?: string | null;
   loading_minutes?: number | null; total_cd_minutes?: number | null;
 }
-interface Toll {
-  id: number; direction: "ida" | "volta"; amount: number; created_at: string; recorded_by?: number | null;
-}
 interface RouteData {
   id: number; codigo_ut: string; route_date: string; origin_name?: string | null;
   origin_address?: string | null; driver_id?: number | null; vehicle_id?: number | null;
-  status: string; stops: Stop[]; dock_session?: Dock | null; tolls: Toll[];
-  km_total_informed?: number | null; km_outbound_informed?: number | null; km_return_informed?: number | null;
+  status: string; stops: Stop[]; dock_session?: Dock | null;
   source?: string; fieldeas_description?: string | null; fieldeas_sync_at?: string | null;
   vehicle_requested?: string | null; vehicle_sent?: string | null;
   helper_assigned?: boolean | null; tracked?: boolean | null;
   driver_payment_amount?: number | null; driver_payment_notes?: string | null;
+  empty_truck_photo_attachment_id?: number | null; empty_truck_photo_url?: string | null;
+  loaded_return_photo_attachment_id?: number | null; loaded_return_photo_url?: string | null;
 }
 interface Driver { id: number; name: string; employment_type?: "proprio" | "agregado"; daily_rate?: number | null; }
 interface Vehicle { id: number; plate: string; vehicle_type_code?: string | null; vehicle_type_label?: string | null; }
@@ -80,6 +78,7 @@ export default function RouteDetail() {
   const [route, setRoute] = useState<RouteData | null>(null);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [vehicleTypes, setVehicleTypes] = useState<{code: string; label: string}[]>([]);
   const [reasons, setReasons] = useState<Reason[]>([]);
   const [proofStop, setProofStop] = useState<Stop | null>(null);
   const [proofFile, setProofFile] = useState<File | null>(null);
@@ -90,8 +89,9 @@ export default function RouteDetail() {
   const [failForm, setFailForm] = useState({ reason_id: "", notes: "", return_type: "total" as "total" | "parcial", returned_quantity: "" });
   const [warehouseStop, setWarehouseStop] = useState<Stop | null>(null);
   const [warehouseFile, setWarehouseFile] = useState<File | null>(null);
+  const [uploadingClosingPhoto, setUploadingClosingPhoto] = useState<"empty-truck-photo" | "loaded-return-photo" | null>(null);
   const [routeCorrectionOpen, setRouteCorrectionOpen] = useState(false);
-  const [routeCorrection, setRouteCorrection] = useState({ status: "", reset_dock_flow: false, reset_all_stops: false, justification: "" });
+  const [routeCorrection, setRouteCorrection] = useState({ status: "", reset_dock_flow: false, reset_all_stops: false, arrival_cd_at: "", operator_released_at: "", departure_cd_at: "", justification: "" });
   const [stopCorrection, setStopCorrection] = useState<Stop | null>(null);
   const [stopCorrectionForm, setStopCorrectionForm] = useState({
     status: "",
@@ -110,10 +110,6 @@ export default function RouteDetail() {
   const [stopForm, setStopForm] = useState({ ...EMPTY_STOP });
   const [error, setError] = useState("");
   const [modalError, setModalError] = useState("");
-  const [tollOpen, setTollOpen] = useState(false);
-  const [tollForm, setTollForm] = useState({ direction: "ida" as "ida" | "volta", amount: "" });
-  const [editKm, setEditKm] = useState(false);
-  const [kmForm, setKmForm] = useState({ km_outbound_informed: "", km_return_informed: "" });
   const [expandedOperations, setExpandedOperations] = useState<Record<number, boolean>>({});
   const [optimizing, setOptimizing] = useState(false);
   const [tenantFeatures, setTenantFeatures] = useState({ feature_route_optimization: true, feature_km_calculation: true });
@@ -133,6 +129,7 @@ export default function RouteDetail() {
     reload();
     api.get("/drivers").then((r) => setDrivers(r.data)).catch(() => {});
     api.get("/vehicles").then((r) => setVehicles(r.data)).catch(() => {});
+    api.get("/vehicle-types", { params: { only_active: true } }).then(r => setVehicleTypes(r.data)).catch(() => {});
     api.get("/failure-reasons").then((r) => setReasons(r.data)).catch(() => {});
   }, [id]);
 
@@ -178,8 +175,6 @@ export default function RouteDetail() {
         vehicle_sent: header.vehicle_sent || null,
         helper_assigned: header.helper_assigned,
         tracked: header.tracked,
-        driver_payment_amount: drivers.find((driver) => String(driver.id) === header.driver_id)?.employment_type === "agregado" && header.driver_payment_amount ? Number(header.driver_payment_amount) : null,
-        driver_payment_notes: drivers.find((driver) => String(driver.id) === header.driver_id)?.employment_type === "agregado" ? header.driver_payment_notes || null : null,
       });
       if (isAdmin && header.status && header.status !== route!.status) {
         if (header.status_justification.trim().length < 3) {
@@ -203,45 +198,11 @@ export default function RouteDetail() {
     catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
 
-  function openToll() { setError(""); setTollForm({ direction: "ida", amount: "" }); setTollOpen(true); }
-  async function addToll(e: React.FormEvent) {
-    e.preventDefault(); setError("");
-    const amount = Number(tollForm.amount);
-    if (!amount || amount <= 0) { setError(t("rd.toll_amount_required")); return; }
-    try {
-      await api.post(`/routes/${id}/tolls`, { direction: tollForm.direction, amount });
-      setTollForm({ ...tollForm, amount: "" });
-      reload();
-    } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
-  }
-  async function deleteToll(tollId: number) {
-    try { await api.delete(`/routes/${id}/tolls/${tollId}`); reload(); }
-    catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
-  }
-
-  function openKm() {
-    setError("");
-    setKmForm({
-      km_outbound_informed: route!.km_outbound_informed != null ? String(route!.km_outbound_informed) : "",
-      km_return_informed: route!.km_return_informed != null ? String(route!.km_return_informed) : "",
-    });
-    setEditKm(true);
-  }
   async function excludeRoute() {
     if (!await appConfirm(t("rd.exclude_confirm", { code: route!.codigo_ut }),{title:"Excluir rota",confirmLabel:"Sim, excluir",danger:true})) return;
     setError("");
     try { await api.delete(`/routes/${id}/exclude`); navigate("/routes"); }
     catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
-  }
-  async function saveKm(e: React.FormEvent) {
-    e.preventDefault(); setError("");
-    try {
-      await api.put(`/routes/${id}/km`, {
-        km_outbound_informed: kmForm.km_outbound_informed !== "" ? Number(kmForm.km_outbound_informed) : null,
-        km_return_informed: kmForm.km_return_informed !== "" ? Number(kmForm.km_return_informed) : null,
-      });
-      setEditKm(false); reload();
-    } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.save_error")); }
   }
 
   function startNewStop() { setError(""); setStopForm({ ...EMPTY_STOP }); setEditingStop("new"); }
@@ -359,9 +320,32 @@ export default function RouteDetail() {
       setWarehouseStop(null); setWarehouseFile(null); reload();
     } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
+  async function uploadClosingPhoto(kind: "empty-truck-photo" | "loaded-return-photo", file: File) {
+    setError("");
+    const tagged = await applyTimemark(file, {
+      routeCode: route!.codigo_ut,
+      driverName: user?.role === "motorista" ? user.name : drivers.find((d) => d.id === route!.driver_id)?.name,
+      vehiclePlate: vehicles.find((v) => v.id === route!.vehicle_id)?.plate,
+    });
+    const payload = new FormData();
+    payload.set("photo", tagged);
+    setUploadingClosingPhoto(kind);
+    try {
+      await api.post(`/routes/${id}/${kind}`, payload);
+      reload();
+    } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
+    finally { setUploadingClosingPhoto(null); }
+  }
   function openRouteCorrection() {
     setError(""); setModalError("");
-    setRouteCorrection({ status: route!.status, reset_dock_flow: false, reset_all_stops: false, justification: "" });
+    const dock = route!.dock_session;
+    setRouteCorrection({
+      status: route!.status, reset_dock_flow: false, reset_all_stops: false,
+      arrival_cd_at: toDatetimeLocal(dock?.arrival_cd_at),
+      operator_released_at: toDatetimeLocal(dock?.operator_released_at),
+      departure_cd_at: toDatetimeLocal(dock?.departure_cd_at),
+      justification: "",
+    });
     setRouteCorrectionOpen(true);
   }
   async function confirmRouteCorrection(e: React.FormEvent) {
@@ -373,6 +357,9 @@ export default function RouteDetail() {
         status: routeCorrection.status || null,
         reset_dock_flow: routeCorrection.reset_dock_flow,
         reset_all_stops: routeCorrection.reset_all_stops,
+        arrival_cd_at: fromDatetimeLocal(routeCorrection.arrival_cd_at),
+        operator_released_at: fromDatetimeLocal(routeCorrection.operator_released_at),
+        departure_cd_at: fromDatetimeLocal(routeCorrection.departure_cd_at),
         justification: routeCorrection.justification.trim(),
       });
       setRouteCorrectionOpen(false); reload();
@@ -425,28 +412,20 @@ export default function RouteDetail() {
   const canClose = hasRole("gestor_brasil", "operador_logistico");
   const canOperateDock = hasRole("motorista", "operador_logistico");
   const canEditRoute = isAdmin;
-  const canRegisterToll = hasRole("admin_global", "gestor_brasil", "operador_logistico", "motorista");
-  const canRegisterKm = hasRole("admin_global", "gestor_brasil", "operador_logistico", "motorista");
-  const canDeleteToll = hasRole("admin_global", "gestor_brasil", "operador_logistico");
-  const tollTotal = (direction: "ida" | "volta") =>
-    route.tolls.filter((tl) => tl.direction === direction).reduce((sum, tl) => sum + tl.amount, 0);
   const isRouteDeparted = Boolean(route.dock_session?.departure_cd_at || route.status === "em_rota" || route.status === "finalizada");
   const isStopClosed = (s: Stop) => s.status === "entregue" || s.status === "falha" || s.status === "devolvido";
   const allStopsClosed = route.stops.length > 0 && route.stops.every(isStopClosed);
   const missingWarehouseProofs = route.stops.filter((s) => s.status === "falha" && !s.warehouse_return_attachment_id);
+  const missingClosingPhotos = !route.empty_truck_photo_attachment_id || !route.loaded_return_photo_attachment_id;
 
   const d = route.dock_session;
   const dockSteps = [
     { action: "arrive-cd", label: t("route.arrive_cd"), field: "arrival_cd_at", allowed: canOperateDock },
-    { action: "enter-dock", label: t("route.enter_dock"), field: "dock_entry_at", allowed: canOperateDock },
-    { action: "loading-start", label: t("route.loading_start"), field: "loading_started_at", allowed: canOperateDock },
-    { action: "loading-finish", label: t("route.loading_finish"), field: "loading_finished_at", allowed: canOperateDock },
     { action: "release", label: t("route.release"), field: "operator_released_at", allowed: canRelease },
-    { action: "depart", label: t("route.depart"), field: "departure_cd_at", allowed: canOperateDock },
     { action: "close", label: t("route.close"), field: null, allowed: canClose },
   ];
   const firstPendingDockAction = dockSteps.find((step) => {
-    if (step.action === "close") return route.status !== "finalizada" && Boolean(d?.departure_cd_at) && allStopsClosed && missingWarehouseProofs.length === 0;
+    if (step.action === "close") return route.status !== "finalizada" && Boolean(d?.departure_cd_at) && allStopsClosed && !missingClosingPhotos;
     return !d?.[step.field as keyof Dock];
   })?.action;
   const isClosed = route.status === "finalizada" || route.status === "cancelada";
@@ -465,9 +444,9 @@ export default function RouteDetail() {
             background: "#0ea5e9", flexShrink: 0,
             boxShadow: "0 0 0 4px rgba(14,165,233,0.25)",
           }} />
-        ) : (
+        ) : route.source === "manual" ? (
           <span title="Manual" style={{ color: "#f59e0b", fontWeight: 800, fontSize: 18, lineHeight: 1 }}>*</span>
-        )}
+        ) : null}
         {isAdmin && <button style={mini} onClick={openRouteCorrection}>{t("rd.admin_correction")}</button>}
         {(isAdmin || hasRole("gestor_brasil")) && (
           <button style={miniDanger} onClick={excludeRoute}>{t("rd.exclude_route")}</button>
@@ -489,9 +468,7 @@ export default function RouteDetail() {
             <Info label={t("route.origin")} value={route.origin_name ?? "—"} />
             <Info label={t("rd.address")} value={route.origin_address ?? "—"} />
             <Info label={t("route.driver")} value={driverName(route.driver_id)} />
-            <Info label="Pagamento do motorista" value={drivers.find((d) => d.id === route.driver_id)?.employment_type === "agregado" ? (route.driver_payment_amount != null ? formatCurrency(Number(route.driver_payment_amount), i18n.language) : "Negociação pendente") : "Diária do cadastro"} />
             <Info label={t("route.vehicle")} value={vehiclePlate(route.vehicle_id)} />
-            <Info label={t("rd.salvesen_pallets")} value={formatQty(salvesenPalletsTotal)} />
             {(route.vehicle_requested || route.vehicle_sent) && (
               <>
                 <Info label={t("rd.vehicle_requested")} value={route.vehicle_requested ?? "—"} />
@@ -535,10 +512,6 @@ export default function RouteDetail() {
                   {drivers.map((dr) => <option key={dr.id} value={dr.id}>{dr.name}</option>)}
                 </select>
               </Field>
-              {drivers.find((driver) => String(driver.id) === header.driver_id)?.employment_type === "agregado" && <>
-                <Field label="Valor negociado da rota"><input required type="number" min="0.01" step="0.01" style={input} value={header.driver_payment_amount} onChange={(e) => setHeader({ ...header, driver_payment_amount: e.target.value })}/></Field>
-                <Field label="Observação da negociação"><input style={input} value={header.driver_payment_notes} onChange={(e) => setHeader({ ...header, driver_payment_notes: e.target.value })}/></Field>
-              </>}
               <Field label={t("route.vehicle")}>
                 <select style={input} value={header.vehicle_id} onChange={(e) => {
                   const vehicleId = e.target.value;
@@ -549,10 +522,13 @@ export default function RouteDetail() {
                   {vehicles.map((v) => <option key={v.id} value={v.id}>{v.plate}</option>)}
                 </select>
               </Field>
-              <Field label={t("rd.vehicle_requested")}><input style={input} placeholder="Ex: truck, carreta" value={header.vehicle_requested}
-                onChange={(e) => setHeader({ ...header, vehicle_requested: e.target.value })} /></Field>
-              <Field label={t("rd.vehicle_sent")}><input style={input} placeholder="Ex: truck_large" value={header.vehicle_sent}
-                onChange={(e) => setHeader({ ...header, vehicle_sent: e.target.value })} /></Field>
+              {(["vehicle_requested", "vehicle_sent"] as const).map(field => <Field key={field} label={t(`rd.${field}`)}>
+                <select style={input} value={header[field]} onChange={e => setHeader({ ...header, [field]: e.target.value })}>
+                  <option value="">Selecione o tipo de veículo</option>
+                  {header[field] && !vehicleTypes.some(type => type.label === header[field]) && <option value={header[field]}>{header[field]}</option>}
+                  {vehicleTypes.map(type => <option key={type.code} value={type.label}>{type.label}</option>)}
+                </select>
+              </Field>)}
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--muted)" }}>
                 <input type="checkbox" checked={header.helper_assigned} onChange={(e) => setHeader({ ...header, helper_assigned: e.target.checked })} />
                 {t("rd.helper_assigned")}
@@ -590,7 +566,10 @@ export default function RouteDetail() {
 
       {/* ---------- Doca / CD (nível da rota) ---------- */}
       <div style={card}>
-        <h3 style={{ marginTop: 0 }}>{t("rd.dock_title")}</h3>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ marginTop: 0 }}>{t("rd.dock_title")}</h3>
+          {isAdmin && <button style={mini} onClick={openRouteCorrection}>{t("rd.edit_dock_times")}</button>}
+        </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
           {dockSteps.map((step) => {
             if (step.action === "close" && !allStopsClosed) return null;
@@ -609,6 +588,49 @@ export default function RouteDetail() {
             );
           })}
         </div>
+        {!isClosed && allStopsClosed && (
+          <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+            <p style={{ margin: "0 0 8px", fontSize: 13, color: "#9a3412" }}>{t("rd.closing_photos_hint")}</p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+              <div>
+                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>{t("rd.empty_truck_photo_label")}</div>
+                {route.empty_truck_photo_url ? (
+                  <a href={route.empty_truck_photo_url} target="_blank" rel="noreferrer" style={{ fontSize: 13 }}>{t("rd.view_photo")}</a>
+                ) : (
+                  <span style={{ fontSize: 13, color: "#b91c1c" }}>{t("rd.photo_pending")}</span>
+                )}
+                <div>
+                  <input
+                    style={input}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    disabled={uploadingClosingPhoto !== null}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadClosingPhoto("empty-truck-photo", f); e.target.value = ""; }}
+                  />
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: "#64748b", marginBottom: 4 }}>{t("rd.loaded_return_photo_label")}</div>
+                {route.loaded_return_photo_url ? (
+                  <a href={route.loaded_return_photo_url} target="_blank" rel="noreferrer" style={{ fontSize: 13 }}>{t("rd.view_photo")}</a>
+                ) : (
+                  <span style={{ fontSize: 13, color: "#b91c1c" }}>{t("rd.photo_pending")}</span>
+                )}
+                <div>
+                  <input
+                    style={input}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    disabled={uploadingClosingPhoto !== null}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadClosingPhoto("loaded-return-photo", f); e.target.value = ""; }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {isClosed && (
           <div style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>
             <span style={{ fontSize: 13, color: "#9a3412" }}>{t("rd.closed_notice")}</span>
@@ -621,84 +643,21 @@ export default function RouteDetail() {
         )}
         <div style={infoGrid}>
           <Info label={t("route.arrive_cd")} value={fmt(d?.arrival_cd_at)} />
-          <Info label={t("route.enter_dock")} value={fmt(d?.dock_entry_at)} />
-          <Info label={t("route.loading_start")} value={fmt(d?.loading_started_at)} />
-          <Info label={t("route.loading_finish")} value={fmt(d?.loading_finished_at)} />
           <Info label={t("route.release")} value={fmt(d?.operator_released_at)} />
-          <Info label={t("route.depart")} value={fmt(d?.departure_cd_at)} />
           <Info label={t("dashboard.avg_dock")} value={d?.loading_minutes != null ? String(d.loading_minutes) : "—"} />
+          {isClosed && (route.empty_truck_photo_url || route.loaded_return_photo_url) && (
+            <>
+              <div>
+                <div style={{ fontSize: 12, color: "#64748b" }}>{t("rd.empty_truck_photo_label")}</div>
+                {route.empty_truck_photo_url ? <a href={route.empty_truck_photo_url} target="_blank" rel="noreferrer" style={{ fontSize: 14 }}>{t("rd.view_photo")}</a> : "—"}
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: "#64748b" }}>{t("rd.loaded_return_photo_label")}</div>
+                {route.loaded_return_photo_url ? <a href={route.loaded_return_photo_url} target="_blank" rel="noreferrer" style={{ fontSize: 14 }}>{t("rd.view_photo")}</a> : "—"}
+              </div>
+            </>
+          )}
         </div>
-      </div>
-
-      {/* ---------- Portagens ---------- */}
-      <div style={card}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ marginTop: 0 }}>{t("rd.tolls")}</h3>
-          {canRegisterToll && <button style={primary} onClick={openToll}>{t("rd.add_toll")}</button>}
-        </div>
-        <div style={infoGrid}>
-          <Info label={t("rd.toll_outbound_total")} value={formatCurrency(tollTotal("ida"), i18n.language)} />
-          <Info label={t("rd.toll_return_total")} value={formatCurrency(tollTotal("volta"), i18n.language)} />
-        </div>
-        {route.tolls.length > 0 && (
-          <table style={table}>
-            <thead>
-              <tr style={{ background: "var(--soft)", textAlign: "left" }}>
-                <th style={th}>{t("rd.toll_direction")}</th>
-                <th style={th}>{t("rd.toll_amount")}</th>
-                <th style={th}>{t("rd.toll_date")}</th>
-                {canDeleteToll && <th style={th}>{t("users.actions")}</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {route.tolls.map((tl) => (
-                <tr key={tl.id} style={{ borderTop: "1px solid var(--line)" }}>
-                  <td style={td}>{t(`rd.toll_${tl.direction}`)}</td>
-                  <td style={td}>{formatCurrency(tl.amount, i18n.language)}</td>
-                  <td style={td}>{fmt(tl.created_at)}</td>
-                  {canDeleteToll && (
-                    <td style={td}><button style={miniDanger} onClick={() => deleteToll(tl.id)}>{t("rd.delete")}</button></td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* ---------- KM final (ida/volta) ---------- */}
-      <div style={card}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ marginTop: 0 }}>{t("rd.km_title")}</h3>
-          {!editKm && canRegisterKm && <button style={mini} onClick={openKm}>{t("users.edit")}</button>}
-        </div>
-        {!editKm ? (
-          <div style={infoGrid}>
-            <Info label={t("rd.km_total_informed")} value={route.km_total_informed != null ? String(route.km_total_informed) : "—"} />
-            <Info label={t("rd.km_outbound")} value={route.km_outbound_informed != null ? String(route.km_outbound_informed) : "—"} />
-            <Info label={t("rd.km_return")} value={route.km_return_informed != null ? String(route.km_return_informed) : "—"} />
-          </div>
-        ) : (
-          <div className="modal-backdrop" onClick={() => setEditKm(false)}>
-          <form className="modal-card" onSubmit={saveKm} onClick={(event) => event.stopPropagation()}>
-            <h3>{t("rd.km_title")}</h3>
-            <div style={infoGrid}>
-              <Field label={t("rd.km_outbound")}>
-                <input type="number" step="any" min="0" style={input} value={kmForm.km_outbound_informed}
-                  onChange={(e) => setKmForm({ ...kmForm, km_outbound_informed: e.target.value })} />
-              </Field>
-              <Field label={t("rd.km_return")}>
-                <input type="number" step="any" min="0" style={input} value={kmForm.km_return_informed}
-                  onChange={(e) => setKmForm({ ...kmForm, km_return_informed: e.target.value })} />
-              </Field>
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <button type="submit" style={primary}>{t("common.save")}</button>
-              <button type="button" style={ghost} onClick={() => setEditKm(false)}>{t("common.cancel")}</button>
-            </div>
-          </form>
-          </div>
-        )}
       </div>
 
       {/* ---------- Paradas ---------- */}
@@ -740,11 +699,8 @@ export default function RouteDetail() {
                 onChange={(e) => setStopForm({ ...stopForm, planned_date: e.target.value })} /></Field>
               <Field label={t("route.deadline_time")}><input type="time" style={input} value={stopForm.planned_time}
                 onChange={(e) => setStopForm({ ...stopForm, planned_time: e.target.value })} /></Field>
-              <Field label="Tipo de parada"><select style={input} required value={stopForm.stop_type} onChange={e=>setStopForm({...stopForm,stop_type:e.target.value as ""|"carga"|"descarga"})}><option value="">Selecione</option><option value="carga">Carga</option><option value="descarga">Descarga</option></select></Field>
               <Field label={t("route.weight")}><input type="number" step="any" style={input} value={stopForm.weight_kg}
                 onChange={(e) => setStopForm({ ...stopForm, weight_kg: e.target.value })} /></Field>
-              <Field label={t("route.pallets")}><input type="number" step="any" style={input} value={stopForm.pallets}
-                onChange={(e) => setStopForm({ ...stopForm, pallets: e.target.value })} /></Field>
               <Field label={t("route.order")}><input style={input} value={stopForm.order_number}
                 onChange={(e) => setStopForm({ ...stopForm, order_number: e.target.value })} /></Field>
             </div>
@@ -756,6 +712,7 @@ export default function RouteDetail() {
           </div>
         )}
 
+        <div className="route-detail-table-wrap">
         <table style={table}>
           <thead>
             <tr style={{ background: "var(--soft)", textAlign: "left" }}>
@@ -763,10 +720,6 @@ export default function RouteDetail() {
               <th style={th}>{t("rd.customer")}</th>
               <th style={th}>{t("rd.address")}</th>
               <th style={th}>{t("rd.city")}</th>
-              <th style={th}>{t("rd.salvesen_pallets")}</th>
-              <th style={th}>{t("fieldeas.stop_type")}</th>
-              <th style={th}>{t("fieldeas.postal_code")}</th>
-              <th style={th}>{t("fieldeas.province")}</th>
               <th style={th}>{t("route.status")}</th>
               <th style={th}>{t("users.actions")}</th>
             </tr>
@@ -792,21 +745,6 @@ export default function RouteDetail() {
                   </td>
                   <td style={td}>{s.customer_address ?? "—"}</td>
                   <td style={td}>{s.city ?? "—"}</td>
-                  <td style={{ ...td, fontWeight: 800, color: "#087461" }}>{formatQty(salvesenPallets(s))}</td>
-                  <td style={td}>
-                    {s.stop_type ? (
-                      <span style={{
-                        background: s.stop_type === "descarga" ? "#f0fdf4" : "#eff6ff",
-                        color: s.stop_type === "descarga" ? "#15803d" : "#1d4ed8",
-                        border: `1px solid ${s.stop_type === "descarga" ? "#bbf7d0" : "#bfdbfe"}`,
-                        padding: "1px 6px", borderRadius: 8, fontSize: 11, fontWeight: 600,
-                      }}>
-                        {t(`fieldeas.stop_type_${s.stop_type}`, { defaultValue: s.stop_type })}
-                      </span>
-                    ) : "—"}
-                  </td>
-                  <td style={td}>{s.postal_code ?? "—"}</td>
-                  <td style={td}>{s.province ?? "—"}</td>
                   <td style={td}>
                     <span style={{ background: STOP_COLOR[s.status] ?? "#999", color: "#fff", padding: "2px 8px", borderRadius: 12, fontSize: 12 }}>
                       {t(`stop_status.${s.status}`, { defaultValue: s.status })}
@@ -833,10 +771,10 @@ export default function RouteDetail() {
                   <td style={td}>
                     {canEditRoute && <button style={mini} onClick={() => startEditStop(s)}>{t("users.edit")}</button>}
                     <button style={!isRouteDeparted || s.checkin_at || isClosed ? disabledMini : mini} disabled={!isRouteDeparted || Boolean(s.checkin_at) || isClosed} onClick={() => checkin(s)}>{t("route.checkin")}</button>
-                    <button style={!isRouteDeparted || !s.checkin_at || isStopClosed(s) || isClosed ? disabledMini : mini} disabled={!isRouteDeparted || !s.checkin_at || isStopClosed(s) || isClosed} onClick={() => openProof(s)}>
+                    <button style={!isRouteDeparted || isStopClosed(s) || isClosed ? disabledMini : mini} disabled={!isRouteDeparted || isStopClosed(s) || isClosed} onClick={() => openProof(s)}>
                       {s.stop_type === "carga" ? t("route.loaded") : t("route.deliver")}
                     </button>
-                    <button style={!isRouteDeparted || !s.checkin_at || isStopClosed(s) || isClosed ? disabledMiniDanger : miniDanger} disabled={!isRouteDeparted || !s.checkin_at || isStopClosed(s) || isClosed} onClick={() => openFail(s)}>{t("rd.fail")}</button>
+                    <button style={!isRouteDeparted || isStopClosed(s) || isClosed ? disabledMiniDanger : miniDanger} disabled={!isRouteDeparted || isStopClosed(s) || isClosed} onClick={() => openFail(s)}>{t("rd.fail")}</button>
                     {s.status === "falha" && !isClosed && (
                       <button style={!s.warehouse_return_attachment_id ? mini : disabledMini} disabled={Boolean(s.warehouse_return_attachment_id)} onClick={() => openWarehouseProof(s)}>
                         {t("rd.warehouse_return_link")}
@@ -848,7 +786,7 @@ export default function RouteDetail() {
                 </tr>
                 {operations.length > 0 && (
                   <tr key={`ops-${s.id}`} style={{ background: "var(--soft)" }}>
-                    <td colSpan={10} style={{ padding: "6px 10px 10px 32px" }}>
+                    <td colSpan={6} style={{ padding: "6px 10px 10px 32px" }}>
                       <button type="button" style={opsToggle} aria-expanded={isOpsExpanded} onClick={() => toggleOperations(s.id)}>
                         <span style={opsToggleIcon}>{isOpsExpanded ? "-" : "+"}</span>
                         {t("fieldeas.operations")} ({operations.length})
@@ -892,6 +830,7 @@ export default function RouteDetail() {
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* ---------- Modal de correção admin da rota ---------- */}
@@ -916,6 +855,20 @@ export default function RouteDetail() {
               <input type="checkbox" checked={routeCorrection.reset_all_stops} onChange={(e) => setRouteCorrection({ ...routeCorrection, reset_all_stops: e.target.checked })} />
               <span>{t("rd.reset_all_stops")}</span>
             </label>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+              <Field label={t("rd.dock_arrival_at_label")}>
+                <input style={input} type="datetime-local" value={routeCorrection.arrival_cd_at}
+                  onChange={(e) => setRouteCorrection({ ...routeCorrection, arrival_cd_at: e.target.value })} />
+              </Field>
+              <Field label={t("rd.dock_release_at_label")}>
+                <input style={input} type="datetime-local" value={routeCorrection.operator_released_at}
+                  onChange={(e) => setRouteCorrection({ ...routeCorrection, operator_released_at: e.target.value })} />
+              </Field>
+              <Field label={t("rd.dock_departure_at_label")}>
+                <input style={input} type="datetime-local" value={routeCorrection.departure_cd_at}
+                  onChange={(e) => setRouteCorrection({ ...routeCorrection, departure_cd_at: e.target.value })} />
+              </Field>
+            </div>
             <Field label={t("rd.justification_label")}>
               <textarea style={{ ...input, minHeight: 72 }} required value={routeCorrection.justification}
                 onChange={(e) => setRouteCorrection({ ...routeCorrection, justification: e.target.value })} />
@@ -1011,7 +964,7 @@ export default function RouteDetail() {
                 accept="image/*,application/pdf"
                 capture="environment"
                 required
-                onChange={async (e) => setProofFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0]) : null)}
+                onChange={async (e) => setProofFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0], {routeCode:route.codigo_ut,stopSequence:proofStop.sequence,address:[proofStop.customer_address,proofStop.city].filter(Boolean).join(" · "),driverName:user?.role==="motorista"?user.name:drivers.find(d=>d.id===route.driver_id)?.name,vehiclePlate:vehicles.find(v=>v.id===route.vehicle_id)?.plate}) : null)}
               />
             </Field>
             <div style={{ marginTop: 12 }}>
@@ -1062,7 +1015,7 @@ export default function RouteDetail() {
                 accept="image/*,application/pdf"
                 capture="environment"
                 required
-                onChange={async (e) => setFailFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0]) : null)}
+                onChange={async (e) => setFailFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0], {routeCode:route.codigo_ut,stopSequence:failStop.sequence,address:[failStop.customer_address,failStop.city].filter(Boolean).join(" · "),driverName:user?.role==="motorista"?user.name:drivers.find(d=>d.id===route.driver_id)?.name,vehiclePlate:vehicles.find(v=>v.id===route.vehicle_id)?.plate}) : null)}
               />
             </Field>
             <Field label={t("rd.notes")}>
@@ -1090,7 +1043,7 @@ export default function RouteDetail() {
                 accept="image/*,application/pdf"
                 capture="environment"
                 required
-                onChange={async (e) => setWarehouseFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0]) : null)}
+                onChange={async (e) => setWarehouseFile(e.target.files?.[0] ? await applyTimemark(e.target.files[0], {routeCode:route.codigo_ut,stopSequence:warehouseStop.sequence,address:[warehouseStop.customer_address,warehouseStop.city].filter(Boolean).join(" · "),driverName:user?.role==="motorista"?user.name:drivers.find(d=>d.id===route.driver_id)?.name,vehiclePlate:vehicles.find(v=>v.id===route.vehicle_id)?.plate}) : null)}
               />
             </Field>
             <div style={{ marginTop: 12 }}>
@@ -1101,29 +1054,6 @@ export default function RouteDetail() {
         </div>
       )}
 
-      {/* ---------- Modal de portagem ---------- */}
-      {tollOpen && (
-        <div style={overlay} onClick={() => setTollOpen(false)}>
-          <form style={modal} onClick={(e) => e.stopPropagation()} onSubmit={addToll}>
-            <h3 style={{ marginTop: 0 }}>{t("rd.add_toll")}</h3>
-            <Field label={t("rd.toll_direction")}>
-              <select style={input} value={tollForm.direction}
-                onChange={(e) => setTollForm({ ...tollForm, direction: e.target.value as "ida" | "volta" })}>
-                <option value="ida">{t("rd.toll_ida")}</option>
-                <option value="volta">{t("rd.toll_volta")}</option>
-              </select>
-            </Field>
-            <Field label={t("rd.toll_amount")}>
-              <input style={input} type="number" step="0.01" min="0" value={tollForm.amount}
-                onChange={(e) => setTollForm({ ...tollForm, amount: e.target.value })} />
-            </Field>
-            <div style={{ marginTop: 12 }}>
-              <button type="submit" style={primary}>{t("common.save")}</button>
-              <button type="button" style={ghost} onClick={() => setTollOpen(false)}>{t("common.cancel")}</button>
-            </div>
-          </form>
-        </div>
-      )}
     </div>
   );
 }
@@ -1138,6 +1068,18 @@ function fmt(s?: string | null) {
   if (!s) return "—";
   const dt = new Date(s);
   return isNaN(dt.getTime()) ? "—" : dt.toLocaleString();
+}
+function toDatetimeLocal(s?: string | null) {
+  if (!s) return "";
+  const dt = new Date(s);
+  if (isNaN(dt.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+}
+function fromDatetimeLocal(s: string): string | null {
+  if (!s) return null;
+  const dt = new Date(s);
+  return isNaN(dt.getTime()) ? null : dt.toISOString();
 }
 function routeLabel(route: { codigo_ut: string; route_date: string }) {
   const [year, month, day] = route.route_date.split("-");
@@ -1233,6 +1175,6 @@ const miniDanger: React.CSSProperties = { ...mini, borderColor: "#fca5a5", color
 const disabledMiniDanger: React.CSSProperties = { ...disabledMini, borderColor: "#fecaca", color: "#fca5a5" };
 const primary: React.CSSProperties = { padding: "8px 14px", borderRadius: 8, border: "none", background: "#0a58ca", color: "#fff", cursor: "pointer", marginRight: 8 };
 const ghost: React.CSSProperties = { padding: "6px 12px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--panel)", color: "var(--ink)", cursor: "pointer" };
-const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", display: "grid", placeItems: "center", zIndex: 5000, padding: 16 };
-const modal: React.CSSProperties = { background: "var(--panel)", color: "var(--ink)", borderRadius: 12, padding: 22, width: 380, maxWidth: "90vw", boxShadow: "0 12px 40px rgba(0,0,0,.2)" };
+const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "rgba(15,23,42,.45)", display: "grid", alignItems: "start", justifyItems: "center", zIndex: 5000, overflowY: "auto", padding: "max(16px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left))" };
+const modal: React.CSSProperties = { background: "var(--panel)", color: "var(--ink)", borderRadius: 12, padding: 22, width: "min(380px, 100%)", maxWidth: "100%", maxHeight: "calc(100dvh - 32px - env(safe-area-inset-top) - env(safe-area-inset-bottom))", overflowY: "auto", boxShadow: "0 12px 40px rgba(0,0,0,.2)" };
 const modalErrorStyle: React.CSSProperties = { color: "#b91c1c", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: 8, fontSize: 13 };
