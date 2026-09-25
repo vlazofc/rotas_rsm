@@ -52,11 +52,22 @@ def _address(stop) -> str:
     parts = [address, stop.province, stop.postal_code, stop.city, "Brasil"]
     return ", ".join(str(part).strip() for part in parts if part) or stop.customer_name
 
-def _coords(value: Any) -> tuple[float, float] | None:
+STATE_BOUNDS = {
+    # Limites amplos do estado, usados como trava contra homônimos em outras UFs.
+    "SP": (-25.4, -19.7, -53.2, -44.0),
+}
+
+
+def _coords(value: Any, province: str | None = None) -> tuple[float, float] | None:
     if not isinstance(value, dict): return None
     try: lat, lng = float(value["lat"]), float(value["lng"])
     except (KeyError, TypeError, ValueError): return None
-    return (lat, lng) if -34.0 <= lat <= 6.0 and -74.0 <= lng <= -28.0 else None
+    if not (-34.0 <= lat <= 6.0 and -74.0 <= lng <= -28.0):
+        return None
+    bounds = STATE_BOUNDS.get((province or "").strip().upper())
+    if bounds and not (bounds[0] <= lat <= bounds[1] and bounds[2] <= lng <= bounds[3]):
+        return None
+    return lat, lng
 
 def _geometry(data: dict[str, Any]) -> str | None:
     coordinates = data.get("route", {}).get("points", {}).get("coordinates")
@@ -82,7 +93,7 @@ def _route_in_legs(route, groups: list[list[Any]], actual_origin: str | None) ->
             if first_point:
                 for stop in groups[0]: stop.latitude, stop.longitude = first_point
                 located += len(groups[0])
-        point = _coords(data.get("dest_coords"))
+        point = _coords(data.get("dest_coords"), group[0].province)
         if point:
             for stop in group: stop.latitude, stop.longitude = point
             located += len(group)
@@ -160,12 +171,24 @@ def route_through_stops(db: Session, route, *, optimize: bool = False) -> dict[s
     waypoint_order = data.get("waypoint_order") or list(range(len(mapped_groups)))
     ordered_middle = [mapped_groups[index] for index in waypoint_order if 0 <= index < len(mapped_groups)]
     for group, raw_coord in zip(ordered_middle, waypoint_coords):
-        point = _coords(raw_coord)
+        point = _coords(raw_coord, group[0].province)
         if point:
             for stop in group: stop.latitude, stop.longitude = point
-    last = _coords(data.get("dest_coords"))
+    last = _coords(data.get("dest_coords"), destination_group[0].province)
     if last:
         for stop in destination_group: stop.latitude, stop.longitude = last
+    missing = [stop for stop in stops if stop.latitude is None or stop.longitude is None]
+    if missing:
+        route.routing_geometry_json = None
+        route.suggested_geometry_json = None
+        route.routing_distance_km = None
+        route.routing_duration_minutes = None
+        route.routing_status = "error"
+        route.routing_error = f"{len(missing)} parada(s) retornaram localização incompatível com a UF informada. Confira endereço e CEP."
+        db.flush()
+        return {"success": False, "error": route.routing_error, "route_id": route.id,
+                "changed_stops": 0, "distance_km": None, "duration_minutes": None,
+                "optimized": False}
     route_data = data.get("route", {}); duration = route_data.get("time", route_data.get("duration"))
     distance = round(float(route_data.get("distance", 0)) / 1000, 1); minutes = round(float(duration) / 60000) if duration is not None else None
     geometry = _geometry(data)
