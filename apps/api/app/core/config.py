@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_timezone: str = "America/Sao_Paulo"
     api_v1_prefix: str = "/api"
     log_level: str = "INFO"
+    run_db_bootstrap: bool = False
 
     # Domínio / CORS
     public_domain: str = "rotas.seudominio.com.br"
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 7
+    jwt_clock_skew_seconds: int = 5
     # Chave exclusiva para cifrar credenciais de integrações. Se vazia, deriva do
     # JWT_SECRET para compatibilidade; em produção, configure uma chave distinta.
     integration_encryption_key: str = ""

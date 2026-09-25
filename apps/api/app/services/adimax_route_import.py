@@ -14,13 +14,15 @@ from app.db.models import (Branch, Customer, DeliveryDestination, Driver, Route,
                            RouteOrigin, RouteStop, Vehicle)
 from app.db.session import SessionLocal
 from app.services.import_changes import snapshot_import, collect_changes, authorize_changes
+from app.services.route_carrier import apply_import_carrier, resolve_import_carrier
 
 SHEET = "LAST MILE - ADIMAX"
 ADIMAX_HEADERS = ["DATA CARREGAMENTO", "DATA ENTREGA", "ROTA", "MOTORISTA", "CPF", "PLACA",
     "TIPO MOTORISTA", "PERFIL ENVIADO", "PERFIL SOLICITADO", "VISÃO TIPOLOGIA", "PERNOITE",
     "DIARIA", "OBSERVAÇÃO", "AJUDANTE SOLICITADO", "AJUDATE ENVIADO", "QUANTIDADE",
     "SEQUENCIA", "CARGA", "PEDIDO", "NOTA FISCAL", "CTE", "ORIGEM", "CLIENTE", "DESTINO",
-    "NUMERO", "BAIRRO", "CIDADE", "PESO BRUTO", "OBSERVAÇÃO CLIENTE", "OBSERVAÇÃO CLIENTE 2"]
+    "NUMERO", "BAIRRO", "CIDADE", "PESO BRUTO", "OBSERVAÇÃO CLIENTE", "OBSERVAÇÃO CLIENTE 2",
+    "ID TRANSPORTADORA", "TRANSPORTADORA"]
 
 
 def build_adimax_template_xlsx() -> io.BytesIO:
@@ -102,7 +104,7 @@ def import_adimax_routes(source, branch_id: int, *, confirmed: bool = False, use
              "stops_created": 0, "stops_updated": 0, "routes_optimized": 0,
              "routing_errors": 0, "route_ids": [], "drivers_created": 0,
              "vehicles_created": 0, "customers_created": 0, "destinations_created": 0,
-             "origins_created": 0, "errors": []}
+             "origins_created": 0, "carrier_pending": 0, "errors": []}
     groups: dict[str, list[tuple]] = {}
     for index, row in enumerate(rows, start=2):
         load = _text(row[17]) if len(row) > 17 else None
@@ -118,6 +120,9 @@ def import_adimax_routes(source, branch_id: int, *, confirmed: bool = False, use
         tenant_id = branch.tenant_id
         for load, group in groups.items():
             first = group[0]
+            normalized_headers = [re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", "", header.upper())).strip() for header in headers]
+            carrier_id_index = next((i for i, header in enumerate(normalized_headers) if header == "ID TRANSPORTADORA"), None)
+            carrier_name_index = next((i for i, header in enumerate(normalized_headers) if header == "TRANSPORTADORA"), None)
             route = db.scalar(select(Route).where(Route.branch_id == branch_id, Route.codigo_ut == load))
             new_route = route is None
             before_route = snapshot_import(route)
@@ -134,7 +139,6 @@ def import_adimax_routes(source, branch_id: int, *, confirmed: bool = False, use
             route.administrative_notes = _text(first[12]); route.helper_requested = _text(first[13])
             route.helper_sent = _text(first[14]); route.load_quantity = int(_number(first[15]) or 0) or None
             if new_route and route.delivery_date and route.delivery_date < date.today(): route.status = "finalizada"
-
             # A planilha pode vincular cadastros já existentes somente ao criar
             # uma rota. Reimportações nunca trocam escala nem alteram/criam
             # motoristas ou veículos mantidos pela operação.
@@ -158,6 +162,15 @@ def import_adimax_routes(source, branch_id: int, *, confirmed: bool = False, use
                     db.add(origin); db.flush(); stats["origins_created"] += 1
                 route.origin_id, route.origin_name, route.origin_address = origin.id, origin.name, origin.address
             collect_changes(changes, before_route, route, load)
+            carrier, carrier_issue = resolve_import_carrier(
+                db, branch_id,
+                carrier_id=int(_number(first[carrier_id_index])) if carrier_id_index is not None and len(first) > carrier_id_index and _number(first[carrier_id_index]) is not None else None,
+                name=_text(first[carrier_name_index]) if carrier_name_index is not None and len(first) > carrier_name_index else None,
+            )
+            apply_import_carrier(route, carrier, carrier_issue)
+            if carrier_issue:
+                stats["carrier_pending"] += 1
+                stats["errors"].append(f"Rota {load}: {carrier_issue}")
             db.flush(); stats["route_ids"].append(route.id)
             stats["routes_created" if new_route else "routes_updated"] += 1
 

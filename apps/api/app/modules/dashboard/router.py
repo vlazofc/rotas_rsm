@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.permissions import Role, branch_scope_filter, operational_scope, scope_by_branch
-from app.db.models import DeliveryFailureReason, DockSession, Route, RouteEvent, RouteStop, User
+from app.db.models import Carrier, CarrierUser, DeliveryFailureReason, DockSession, Route, RouteEvent, RouteStop, User
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.cache import get_json, set_json
@@ -24,27 +24,41 @@ def summary(
     range: str = "day",
     status: str = "open",
     period_ref: str | None = None,
+    carrier_id: int | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    cache_key = f"dashboard:v4:{user.role}:{operational_scope(user, db).value}:{user.tenant_id}:{user.branch_id}:{range}:{status}:{period_ref or '-'}"
+    carrier_membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+    acting_carrier_id = getattr(user, "acting_carrier_id", None) if user.role == Role.ADMIN_GLOBAL.value else None
+    can_filter_carriers = carrier_membership is None and acting_carrier_id is None and user.role not in {Role.MOTORISTA.value, Role.CLIENTE.value}
+    effective_carrier_id = acting_carrier_id or (carrier_id if can_filter_carriers else (carrier_membership.carrier_id if carrier_membership else None))
+    cache_key = f"dashboard:v5:{user.id}:{user.role}:{operational_scope(user, db).value}:{user.tenant_id}:{user.branch_id}:{range}:{status}:{period_ref or '-'}:{effective_carrier_id or '-'}"
     cached = get_json(cache_key)
     if cached is not None:
         return cached
 
-    branch_filter = [branch_scope_filter(Route.branch_id, user, db)]
-
-    def count(*conds):
-        return db.scalar(select(func.count(Route.id)).where(*branch_filter, *conds)) or 0
-
     selected_statuses = _status_set(status)
     today = date.today()
     start_date, end_date, bucket_range = _period_bounds(today, range, period_ref)
+    branch_filter = branch_scope_filter(Route.branch_id, user, db)
+    base_route_filter = [
+        branch_filter,
+        Route.excluded.is_(False),
+        Route.route_date >= start_date,
+        Route.route_date <= end_date,
+        Route.status.in_(selected_statuses),
+    ]
+    route_filter = list(base_route_filter)
+    if effective_carrier_id is not None:
+        route_filter.append(Route.carrier_id == effective_carrier_id)
+
+    def count(*conds):
+        return db.scalar(select(func.count(Route.id)).where(*route_filter, *conds)) or 0
 
     routes = db.scalars(
         select(Route)
         .options(selectinload(Route.stops), selectinload(Route.events), selectinload(Route.dock_session))
-        .where(*branch_filter, Route.route_date >= start_date, Route.route_date <= end_date, Route.status.in_(selected_statuses))
+        .where(*route_filter)
         .order_by(Route.route_date.asc(), Route.id.asc())
     ).all()
 
@@ -76,20 +90,14 @@ def summary(
     avg_dock = db.scalar(
         select(func.avg(DockSession.loading_minutes)).join(Route, Route.id == DockSession.route_id)
         .where(
-            *branch_filter,
-            Route.route_date >= start_date,
-            Route.route_date <= end_date,
-            Route.status.in_(selected_statuses),
+            *route_filter,
             DockSession.loading_minutes.is_not(None),
         )
     )
 
     late = db.scalar(
         select(func.count(RouteStop.id)).join(Route, Route.id == RouteStop.route_id).where(
-            *branch_filter,
-            Route.route_date >= start_date,
-            Route.route_date <= end_date,
-            Route.status.in_(selected_statuses),
+            *route_filter,
             RouteStop.status.in_(["pendente", "em_rota"]),
             RouteStop.planned_date < today,
         )
@@ -98,6 +106,9 @@ def summary(
     result = {
         "periodo": range,
         "filtro_status": status,
+        "filtro_transportadora_id": effective_carrier_id,
+        "pode_filtrar_transportadoras": can_filter_carriers,
+        "transportadoras_disponiveis": _carrier_options(db, [branch_filter, Route.excluded.is_(False)]) if can_filter_carriers else [],
         "rotas_total": total_routes,
         "rotas_abertas": sum(1 for route in routes if route.status in OPEN_STATUSES),
         "rotas_fechadas": sum(1 for route in routes if route.status in CLOSED_STATUSES),
@@ -130,9 +141,37 @@ def summary(
         "serie_entregas": _build_delivery_series(routes, bucket_range, start_date, end_date),
         "serie_tempos": _build_time_series(routes, bucket_range, start_date, end_date),
         "serie_carga": _build_load_series(routes, bucket_range, start_date, end_date),
+        "volumetria_transportadoras": _carrier_volume(db, routes),
     }
     set_json(cache_key, result, 2)
     return result
+
+
+def _carrier_volume(db: Session, routes: list[Route]) -> list[dict[str, int | str | None]]:
+    carrier_ids = {route.carrier_id for route in routes if route.carrier_id is not None}
+    names = dict(db.execute(select(Carrier.id, Carrier.name).where(Carrier.id.in_(carrier_ids))).all()) if carrier_ids else {}
+    totals: dict[int | None, dict[str, int | str | None]] = {}
+    for route in routes:
+        item = totals.setdefault(route.carrier_id, {
+            "carrier_id": route.carrier_id,
+            "transportadora": names.get(route.carrier_id, "Não definida"),
+            "rotas": 0,
+            "entregas": 0,
+        })
+        item["rotas"] = int(item["rotas"]) + 1
+        item["entregas"] = int(item["entregas"]) + len(route.stops)
+    return sorted(totals.values(), key=lambda item: (-int(item["rotas"]), str(item["transportadora"])))
+
+
+def _carrier_options(db: Session, filters: list) -> list[dict[str, int | str]]:
+    rows = db.execute(
+        select(Carrier.id, Carrier.name)
+        .join(Route, Route.carrier_id == Carrier.id)
+        .where(*filters)
+        .distinct()
+        .order_by(Carrier.name)
+    ).all()
+    return [{"id": row.id, "nome": row.name} for row in rows]
 
 
 def _status_set(status: str) -> set[str]:

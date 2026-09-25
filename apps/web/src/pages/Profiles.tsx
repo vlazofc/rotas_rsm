@@ -8,6 +8,7 @@ const MODULES = [
   ["module.monitoring","Monitoramento de rotas"], ["module.occurrences","Ocorrências"],
   ["module.gallery","Galeria"], ["module.tracking","Acompanhamento"], ["module.drivers","Motoristas"],
   ["module.vehicles","Veículos"], ["module.reports","Relatórios"], ["module.users","Usuários"],
+  ["module.carriers","Transportadoras"], ["module.branches","Filiais"],
 ] as const;
 const EMPTY:Profile={value:"",label:"",description:"",permissions:[],sort_order:100,active:true,system:false};
 

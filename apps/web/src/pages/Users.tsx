@@ -10,6 +10,7 @@ interface UserRow {
   must_change_password: boolean;
   blocked: boolean; status_reason?: string | null;
   department?: string | null; subgroup?: string | null; permissions?: string[];
+  carrier_id?: number | null; carrier_name?: string | null;
 }
 interface RoleOption {
   value: string;
@@ -20,6 +21,8 @@ interface RoleOption {
 }
 interface BranchOption { id:number; name:string; tenant_id:number|null }
 interface DriverOption { id:number; name:string; user_id?:number|null; tenant_id?:number|null; branch_id:number; active:boolean; blocked:boolean }
+interface CarrierOption { id:number; name:string; tenant_id:number|null; active:boolean }
+interface CarrierMaster { carrier_id:number; carrier_name:string; user_id:number; user_name:string; user_email:string; is_first_master:boolean }
 interface OperationalSettings {
   require_manual_justification: boolean;
   require_checkin_before_delivery: boolean;
@@ -30,7 +33,7 @@ interface OperationalSettings {
   require_returned_quantity: boolean;
   routing_enabled: boolean;
 }
-const EMPTY = { email: "", login: "", name: "", role: "motorista", department: "", subgroup: "", branch_id: "", tenant_id: "", driver_id: "", permissions: [] as string[] };
+const EMPTY = { email: "", login: "", name: "", role: "motorista", department: "", subgroup: "", branch_id: "", tenant_id: "", driver_id: "", carrier_id: "", permissions: [] as string[] };
 const DEPARTMENTS = ["Operação", "Torre de controle", "Frota", "Cadastros", "Diretoria"];
 const ROLE_ORDER = [
   "admin_global",
@@ -45,6 +48,8 @@ export default function Users() {
   const { t } = useTranslation();
   const { user: me } = useAuth();
   const [users, setUsers] = useState<UserRow[]>([]);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [usersLoadError, setUsersLoadError] = useState("");
   const [roles, setRoles] = useState<RoleOption[]>([]);
   const [editing, setEditing] = useState<"new" | number | null>(null);
   const [form, setForm] = useState({ ...EMPTY });
@@ -56,14 +61,31 @@ export default function Users() {
   const [routingSaving, setRoutingSaving] = useState(false);
   const [branches,setBranches]=useState<BranchOption[]>([]);
   const [drivers,setDrivers]=useState<DriverOption[]>([]);
-  const [section,setSection]=useState<"internal"|"drivers">("internal");
+  const [carriers,setCarriers]=useState<CarrierOption[]>([]);
+  const [carrierMasters,setCarrierMasters]=useState<CarrierMaster[]>([]);
+  const [section,setSection]=useState<"internal"|"carrier_users"|"drivers"|"masters">("internal");
 
-  const reload = () => api.get("/users").then((r) => setUsers(r.data)).catch(() => setUsers([]));
+  const reload = async () => {
+    setUsersLoading(true);
+    setUsersLoadError("");
+    try {
+      const { data } = await api.get<UserRow[]>("/users");
+      if (!Array.isArray(data)) throw new Error("Resposta inválida ao consultar usuários.");
+      setUsers(data);
+    } catch (err: any) {
+      setUsersLoadError(err?.response?.data?.detail ?? "Não foi possível carregar os usuários. Tente novamente.");
+    } finally {
+      setUsersLoading(false);
+    }
+  };
   const reloadDrivers = () => api.get<DriverOption[]>("/drivers").then((r) => setDrivers(r.data)).catch(() => setDrivers([]));
+  const reloadMasters = () => api.get<CarrierMaster[]>("/access-model/carrier-masters").then((r) => setCarrierMasters(r.data)).catch(() => setCarrierMasters([]));
 
   useEffect(() => {
     reload();
     reloadDrivers();
+    reloadMasters();
+    api.get<CarrierOption[]>("/carriers?only_active=true").then(r=>setCarriers(r.data)).catch(()=>setCarriers([]));
     api.get("/users/roles")
       .then((r) => setRoles(orderRoles(r.data)))
       .catch(() => setRoles(orderRoles(ROLE_ORDER.map((value) => ({ value, description: "" })))));
@@ -98,27 +120,28 @@ export default function Users() {
 
   function startNew() {
     setError("");
-    setForm({ ...EMPTY, role: section === "drivers" ? "motorista" : "planejamento" });
+    setForm({ ...EMPTY, role: section === "drivers" ? "motorista" : section === "masters" ? "gestor_brasil" : "planejamento", department:section === "masters" ? "Transportadora" : "" });
     setEditing("new");
   }
 
   function startEdit(u: UserRow) {
     setError("");
     const branch=branches.find(item=>item.id===u.branch_id);
-    setForm({ email: u.email, login: u.login || (u.role === "motorista" ? u.email.split("@")[0] : ""), name: u.name, role: u.role, department: u.department || "", subgroup: u.subgroup || "", branch_id:u.branch_id?String(u.branch_id):"", tenant_id:String(branch?.tenant_id??u.tenant_id??""), driver_id:String(drivers.find(driver=>driver.user_id===u.id)?.id||""), permissions: [] });
+    setForm({ email: u.email, login: u.login || (u.role === "motorista" ? u.email.split("@")[0] : ""), name: u.name, role: u.role, department: u.department || "", subgroup: u.subgroup || "", branch_id:u.branch_id?String(u.branch_id):"", tenant_id:String(branch?.tenant_id??u.tenant_id??""), driver_id:String(drivers.find(driver=>driver.user_id===u.id)?.id||""), carrier_id:String(carrierMasters.find(master=>master.user_id===u.id)?.carrier_id||""), permissions: [] });
     setEditing(u.id);
   }
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
     if (saving) return;
+    if(section==="masters"&&!form.carrier_id){setError("Selecione a transportadora do usuário master.");return}
     setSaving(true);
     setError("");
     try {
       let savedUserId: number;
       if (editing === "new") {
         const { data } = await api.post("/users", {
-          email: section === "drivers" ? null : form.email, login: section === "drivers" ? form.login : null, name: form.name, role: form.role,
+          email: section === "drivers" ? null : form.email, login: section === "drivers" ? form.login : null, name: form.name, role: section === "masters" ? "operador_logistico" : form.role,
           department: form.department || null, subgroup: form.subgroup || null, permissions: [],
           branch_id: form.branch_id ? Number(form.branch_id) : null,
         });
@@ -127,7 +150,7 @@ export default function Users() {
         setCopied(false);
       } else if (typeof editing === "number") {
         await api.put(`/users/${editing}`, {
-          ...(section === "drivers" ? { login: form.login } : { email: form.email }), name: form.name, role: form.role, department: form.department || null,
+          ...(section === "drivers" ? { login: form.login } : { email: form.email }), name: form.name, ...(section === "masters" ? {} : {role: form.role}), department: form.department || null,
           subgroup: form.subgroup || null, permissions: [],
           branch_id: form.branch_id ? Number(form.branch_id) : null,
         });
@@ -142,11 +165,16 @@ export default function Users() {
         if(selected&&current?.id!==selected)await api.put(`/drivers/${selected}`,{user_id:savedUserId});
         await reloadDrivers();
       }
+      if(section==="masters"){
+        if(!form.carrier_id) throw new Error("Selecione a transportadora do usuário master.");
+        await api.post(`/access-model/carriers/${Number(form.carrier_id)}/masters/${savedUserId}`);
+        await reloadMasters();
+      }
       setEditing(null);
       reload();
     } catch (err: any) {
       const detail = err?.response?.data?.detail;
-      setError(typeof detail === "string" ? detail : t("users.save_error"));
+      setError(typeof detail === "string" ? detail : err?.message || t("users.save_error"));
     } finally { setSaving(false); }
   }
 
@@ -177,7 +205,10 @@ export default function Users() {
     return profile?.label || t(`roles.${value}`, { defaultValue: value });
   };
 
-  const visibleUsers = users.filter((user) => section === "drivers" ? user.role === "motorista" : user.role !== "motorista");
+  const masterUserIds=new Set(carrierMasters.map(master=>master.user_id));
+  const isCarrierContext=Boolean(me?.is_carrier_master);
+  const internalUsers=users.filter((user) => user.role!=="motorista"&&!masterUserIds.has(user.id)&&(isCarrierContext?Boolean(user.carrier_id):!user.carrier_id));
+  const visibleUsers = users.filter((user) => section === "drivers" ? user.role === "motorista" : section === "masters" ? masterUserIds.has(user.id) : section === "carrier_users" ? Boolean(user.carrier_id)&&!masterUserIds.has(user.id)&&user.role!=="motorista" : internalUsers.some(internal=>internal.id===user.id));
 
   return (
     <div>
@@ -186,10 +217,11 @@ export default function Users() {
           <h2 style={{ margin: 0 }}>{t("users.title")}</h2>
           <p style={subtitle}>{t("users.subtitle")}</p>
         </div>
-        <button style={primary} onClick={startNew}>{section === "drivers" ? "Novo acesso de motorista" : t("users.new")}</button>
+        {section!=="carrier_users"&&<button style={primary} onClick={startNew}>{section === "drivers" ? "Novo acesso de motorista" : section === "masters" ? "Novo master" : t("users.new")}</button>}
       </div>
 
       {error && <p style={{ color: "#c00" }}>{error}</p>}
+      {usersLoadError && <p role="alert" style={{ color: "#c00" }}>{usersLoadError} <button type="button" className="btn-mini" style={mini} onClick={() => void reload()}>Tentar novamente</button></p>}
 
       {me?.role === "admin_global" && operationalSettings && (
         <section style={{ ...panel, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
@@ -218,22 +250,28 @@ export default function Users() {
 
       <nav aria-label="Seções de usuários" style={sectionNav}>
         <button type="button" onClick={() => setSection("internal")} style={{...sectionButton,...(section === "internal" ? sectionButtonActive : {})}}>
-          Usuários internos <span style={sectionCount}>{users.filter(user => user.role !== "motorista").length}</span>
+          {isCarrierContext?"Usuários da transportadora":"Usuários internos"} <span style={sectionCount}>{usersLoading ? "…" : internalUsers.length}</span>
         </button>
+        {!me?.is_carrier_master&&<button type="button" onClick={() => setSection("carrier_users")} style={{...sectionButton,...(section === "carrier_users" ? sectionButtonActive : {})}}>
+          Usuários de transportadoras <span style={sectionCount}>{usersLoading ? "…" : users.filter(user=>Boolean(user.carrier_id)&&!masterUserIds.has(user.id)&&user.role!=="motorista").length}</span>
+        </button>}
         <button type="button" onClick={() => setSection("drivers")} style={{...sectionButton,...(section === "drivers" ? sectionButtonActive : {})}}>
-          Acesso de motoristas <span style={sectionCount}>{users.filter(user => user.role === "motorista").length}</span>
+          Acesso de motoristas <span style={sectionCount}>{usersLoading ? "…" : users.filter(user => user.role === "motorista").length}</span>
+        </button>
+        <button type="button" onClick={() => setSection("masters")} style={{...sectionButton,...(section === "masters" ? sectionButtonActive : {})}}>
+          Masters de transportadoras <span style={sectionCount}>{carrierMasters.length}</span>
         </button>
       </nav>
 
       <div style={{marginTop:12,marginBottom:4}}>
-        <strong>{section === "drivers" ? "Cadastro de acesso de motorista" : "Cadastro de usuários internos"}</strong>
-        <p style={subtitle}>{section === "drivers" ? "Gerencie login, situação e senha dos motoristas que acessam o Adimax Log." : "Gerencie os acessos da equipe administrativa e operacional."}</p>
+        <strong>{section === "drivers" ? "Cadastro de acesso de motorista" : section === "masters" ? "Cadastro de masters de transportadoras" : section === "carrier_users" ? "Usuários criados pelas transportadoras" : isCarrierContext ? "Cadastro de usuários da transportadora" : "Cadastro de usuários internos"}</strong>
+        <p style={subtitle}>{section === "drivers" ? "Gerencie login, situação e senha dos motoristas que acessam o Adimax Log." : section === "masters" ? "Crie o usuário e vincule-o à transportadora no mesmo cadastro. Cada transportadora aceita até três masters ativos." : section === "carrier_users" ? "Consulte e gerencie os acessos criados pelos masters de cada transportadora." : isCarrierContext ? "Gerencie os acessos vinculados exclusivamente à sua transportadora." : "Gerencie os acessos da equipe administrativa e operacional."}</p>
       </div>
 
       {editing !== null && (
         <div className="modal-backdrop" onClick={() => setEditing(null)}>
         <form onSubmit={save} className="modal-card driver-modal" onClick={(event) => event.stopPropagation()}>
-          <h3 style={{ marginTop: 0 }}>{section === "drivers" ? (editing === "new" ? "Novo acesso de motorista" : "Editar acesso de motorista") : (editing === "new" ? t("users.new") : t("users.edit"))}</h3>
+          <h3 style={{ marginTop: 0 }}>{section === "drivers" ? (editing === "new" ? "Novo acesso de motorista" : "Editar acesso de motorista") : section === "masters" ? (editing === "new" ? "Novo master de transportadora" : "Editar master") : (editing === "new" ? t("users.new") : t("users.edit"))}</h3>
           <div style={grid}>
             {section === "drivers" ? <label style={field}>
               <span>Usuário</span>
@@ -251,6 +289,15 @@ export default function Users() {
               <input style={input} required value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </label>
+            {section === "masters" && <label style={field}>
+              <span>Transportadora *</span>
+              <select style={input} required disabled={editing !== "new"} value={form.carrier_id} onChange={e=>{
+                const carrier=carriers.find(item=>String(item.id)===e.target.value);
+                const branch=branches.find(item=>item.tenant_id===carrier?.tenant_id);
+                setForm({...form,carrier_id:e.target.value,tenant_id:String(carrier?.tenant_id||""),branch_id:branch?String(branch.id):""});
+              }}><option value="">Selecione a transportadora</option>{carriers.map(carrier=><option key={carrier.id} value={carrier.id}>{carrier.name}</option>)}</select>
+              <small>O usuário visualizará somente a operação da transportadora selecionada.</small>
+            </label>}
             {section === "drivers" && <label style={field}>
               <span>Cadastro do motorista</span>
               <select style={input} required value={form.driver_id} onChange={e=>{
@@ -262,7 +309,7 @@ export default function Users() {
               </select>
               <small>Empresa e filial serão ajustadas ao cadastro escolhido. As rotas atribuídas aparecerão neste login.</small>
             </label>}
-            {section !== "drivers" && <label style={field}>
+            {section === "internal" && <label style={field}>
               <span>{t("users.role")}</span>
               <select style={input} value={form.role}
                 onChange={(e) => setForm({ ...form, role: e.target.value })}>
@@ -271,7 +318,7 @@ export default function Users() {
                 ))}
               </select>
             </label>}
-            {section !== "drivers" && <label style={field}>
+            {section === "internal" && <label style={field}>
               <span>Setor</span>
               <select style={input} value={form.department}
                 onChange={(e) => setForm({ ...form, department: e.target.value })}>
@@ -279,12 +326,12 @@ export default function Users() {
                 {departments.map(department => <option key={department} value={department}>{department}</option>)}
               </select>
             </label>}
-            {section !== "drivers" && <label style={field}>
+            {section === "internal" && <label style={field}>
               <span>Subgrupo</span>
               <input style={input} value={form.subgroup} placeholder="Ex.: Supervisão de entregas"
                 onChange={(e) => setForm({ ...form, subgroup: e.target.value })} />
             </label>}
-            <label style={field}><span>Filial</span><select style={input} disabled={section==="drivers"&&Boolean(form.driver_id)} value={form.branch_id} onChange={e=>setForm({...form,branch_id:e.target.value,tenant_id:String(branches.find(item=>item.id===Number(e.target.value))?.tenant_id??"")})}><option value="">Selecione a filial</option>{branches.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+            <label style={field}><span>Filial principal</span><select style={input} disabled={(section==="drivers"&&Boolean(form.driver_id))||section==="masters"} value={form.branch_id} onChange={e=>setForm({...form,branch_id:e.target.value,tenant_id:String(branches.find(item=>item.id===Number(e.target.value))?.tenant_id??"")})}><option value="">Selecione a filial</option>{branches.filter(item=>section!=="masters"||item.tenant_id===Number(form.tenant_id)).map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
             {editing === "new" && <p style={{ ...subtitle, gridColumn: "1 / -1" }}>A senha inicial será gerada automaticamente ao salvar. O usuário deverá trocá-la no primeiro acesso.</p>}
           </div>
           {error && <p role="alert" style={{ color: "#c00" }}>{error}</p>}
@@ -320,6 +367,8 @@ export default function Users() {
             <th style={th}>{t("users.role")}</th>
             <th style={th}>Setor / subgrupo</th>
             {section === "drivers"&&<th style={th}>Motorista vinculado</th>}
+            {section === "masters"&&<th style={th}>Transportadora</th>}
+            {section === "carrier_users"&&<th style={th}>Transportadora</th>}
             <th style={th}>{t("users.active")}</th>
             <th style={th}>{t("users.actions")}</th>
           </tr>
@@ -329,9 +378,11 @@ export default function Users() {
             <tr key={u.id} style={{ borderTop: "1px solid var(--line)" }}>
               <td style={td}>{u.name}</td>
               <td style={td}>{section === "drivers" ? (u.login || u.email.split("@")[0]) : u.email}</td>
-              <td style={td}>{roleLabel(u.role)}</td>
+              <td style={td}>{section === "masters" ? "Master" : roleLabel(u.role)}</td>
               <td style={td}>{[u.department, u.subgroup].filter(Boolean).join(" / ") || "—"}</td>
               {section === "drivers"&&<td style={td}>{drivers.find(driver=>driver.user_id===u.id)?.name||<span className="stock-badge warning">Sem vínculo</span>}</td>}
+              {section === "masters"&&<td style={td}>{carrierMasters.find(master=>master.user_id===u.id)?.carrier_name||"—"}</td>}
+              {section === "carrier_users"&&<td style={td}>{u.carrier_name||"—"}</td>}
               <td style={td}><span className={`stock-badge ${u.blocked ? "expired" : u.active ? "ok" : ""}`} title={u.status_reason||""}>{u.blocked?"Bloqueado":u.active?"Ativo":"Inativo"}</span></td>
               <td style={td}>
                 <button className="btn-mini" style={mini} onClick={() => startEdit(u)}>{t("users.edit")}</button>
@@ -340,7 +391,8 @@ export default function Users() {
               </td>
             </tr>
           ))}
-          {visibleUsers.length === 0 && <tr><td style={{...td,textAlign:"center",color:"var(--muted)"}} colSpan={section==="drivers"?7:6}>{section === "drivers" ? "Nenhum acesso de motorista cadastrado." : "Nenhum usuário interno cadastrado."}</td></tr>}
+          {usersLoading && section !== "masters" && <tr><td style={{...td,textAlign:"center",color:"var(--muted)"}} colSpan={section==="internal"?6:7}>Carregando usuários…</td></tr>}
+          {!usersLoading && visibleUsers.length === 0 && <tr><td style={{...td,textAlign:"center",color:"var(--muted)"}} colSpan={section==="internal"?6:7}>{section === "drivers" ? "Nenhum acesso de motorista cadastrado." : section === "masters" ? "Nenhum master de transportadora cadastrado." : section === "carrier_users" ? "Nenhum usuário criado por transportadora." : isCarrierContext ? "Nenhum usuário cadastrado para esta transportadora." : "Nenhum usuário interno cadastrado."}</td></tr>}
         </tbody>
       </table></div>
     </div>

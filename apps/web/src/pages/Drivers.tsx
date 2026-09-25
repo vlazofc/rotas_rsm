@@ -153,7 +153,7 @@ export default function Drivers() {
     try {
       const payload = {
         branch_id: form.branch_ids[0] || user?.branch_id || 1,
-        branch_ids: branches.filter(branch => branch.tenant_id === user?.tenant_id).map(branch => branch.id),
+        branch_ids: form.branch_ids,
         ...Object.fromEntries(
           Object.entries(form).filter(([key])=>key!=="branch_ids").map(([key, value]) => [key, value || null]),
         ),
@@ -364,7 +364,20 @@ export default function Drivers() {
           >
             <h3>{editing === "new" ? "Novo motorista" : "Editar motorista"}</h3>
             <h4>Filiais onde pode atuar</h4>
-            <p className="page-subtitle">Disponível automaticamente em todas as filiais da empresa.</p>
+            <p className="page-subtitle">Selecione explicitamente as unidades autorizadas. Novas filiais não serão incluídas automaticamente.</p>
+            <div className="checkbox-grid">
+              {branches.filter(branch => user?.tenant_id == null || branch.tenant_id === user.tenant_id).map(branch => (
+                <label key={branch.id} className="check-row">
+                  <input type="checkbox" checked={form.branch_ids.includes(branch.id)} onChange={(event) => setForm({
+                    ...form,
+                    branch_ids: event.target.checked
+                      ? [...form.branch_ids, branch.id]
+                      : form.branch_ids.filter(id => id !== branch.id),
+                  })} />
+                  <span>{branch.name}</span>
+                </label>
+              ))}
+            </div>
             <h4>Dados pessoais e contato</h4>
             <div className="form-grid">
               <Field label="Acesso no app do motorista">

@@ -15,6 +15,9 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.net.Uri;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.provider.Settings;
@@ -55,15 +58,16 @@ public class MainActivity extends AppCompatActivity {
     private WebView webView; private SwipeRefreshLayout swipeRefresh; private ValueCallback<Uri[]> fileCallback;
     private Uri cameraOutput; private String pendingGeoOrigin; private GeolocationPermissions.Callback pendingGeoCallback;
     private LocationManager locationManager; private LocationListener locationListener; private boolean locationRequested=false; private long locationInterval=120000L; private File pendingInstallApk;
+    private ConnectivityManager connectivityManager; private ConnectivityManager.NetworkCallback networkCallback;
 
     @SuppressLint({"SetJavaScriptEnabled","JavascriptInterface"})
     @Override protected void onCreate(Bundle state){super.onCreate(state);setContentView(R.layout.activity_main);webView=findViewById(R.id.webView);swipeRefresh=findViewById(R.id.swipeRefresh);locationManager=(LocationManager)getSystemService(LOCATION_SERVICE);configureSafeArea();createOperationalNotificationChannel();
-        WebSettings s=webView.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setDatabaseEnabled(true);s.setGeolocationEnabled(true);s.setAllowFileAccess(false);s.setAllowContentAccess(true);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setCacheMode(WebSettings.LOAD_DEFAULT);s.setUserAgentString(s.getUserAgentString()+" AdimaxMotorista/1.3 AndroidWebView");
+        WebSettings s=webView.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setDatabaseEnabled(true);s.setGeolocationEnabled(true);s.setAllowFileAccess(false);s.setAllowContentAccess(true);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setCacheMode(isOnline()?WebSettings.LOAD_DEFAULT:WebSettings.LOAD_CACHE_ELSE_NETWORK);s.setUserAgentString(s.getUserAgentString()+" AdimaxMotorista/1.4 AndroidWebView");
         webView.addJavascriptInterface(new AndroidLocationBridge(),"AndroidLocation");webView.addJavascriptInterface(new AndroidNavigationBridge(),"AndroidNavigation");webView.setWebViewClient(new DriverWebViewClient());webView.setWebChromeClient(new DriverChromeClient());webView.setDownloadListener((url,a,d,t,z)->openExternal(url));
         // As rotas já são atualizadas por polling. O gesto de recarregar fechava a parada e os anexos em andamento.
         swipeRefresh.setEnabled(false);
         getOnBackPressedDispatcher().addCallback(this,new OnBackPressedCallback(true){@Override public void handleOnBackPressed(){if(webView.canGoBack())webView.goBack();else finish();}});
-        if(state==null)webView.loadUrl(getSharedPreferences("driver_navigation",MODE_PRIVATE).getString("last_route_url",BuildConfig.APP_URL+"/routes"));else webView.restoreState(state);checkForUpdate();
+        registerNetworkObserver();if(state==null)webView.loadUrl(getSharedPreferences("driver_navigation",MODE_PRIVATE).getString("last_route_url",BuildConfig.APP_URL+"/routes"));else webView.restoreState(state);checkForUpdate();
     }
     private void configureSafeArea(){ViewCompat.setOnApplyWindowInsetsListener(swipeRefresh,(view,insets)->{Insets bars=insets.getInsets(WindowInsetsCompat.Type.systemBars()|WindowInsetsCompat.Type.displayCutout());view.setPadding(bars.left,bars.top,bars.right,bars.bottom);return insets;});ViewCompat.requestApplyInsets(swipeRefresh);}
     private void createOperationalNotificationChannel(){NotificationManager manager=getSystemService(NotificationManager.class);NotificationChannel channel=new NotificationChannel("adimax_operational_alerts","Avisos operacionais",NotificationManager.IMPORTANCE_HIGH);channel.setDescription("Alterações de rota, ocorrências e avisos ao motorista");channel.enableVibration(true);manager.createNotificationChannel(channel);}
@@ -71,7 +75,10 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onSaveInstanceState(@NonNull Bundle out){webView.saveState(out);super.onSaveInstanceState(out);}
     @Override protected void onPause(){saveNavigationUrl(webView.getUrl());super.onPause();}
     @Override protected void onResume(){super.onResume();if(locationRequested)startLocationUpdates(locationInterval);if(pendingInstallApk!=null&&pendingInstallApk.exists()&&(android.os.Build.VERSION.SDK_INT<26||getPackageManager().canRequestPackageInstalls())){File apk=pendingInstallApk;pendingInstallApk=null;webView.postDelayed(()->installUpdate(apk),350);}}
-    @Override protected void onDestroy(){stopLocationUpdates();webView.removeJavascriptInterface("AndroidLocation");webView.removeJavascriptInterface("AndroidNavigation");webView.destroy();super.onDestroy();}
+    @Override protected void onDestroy(){stopLocationUpdates();if(connectivityManager!=null&&networkCallback!=null)try{connectivityManager.unregisterNetworkCallback(networkCallback);}catch(Exception ignored){}webView.removeJavascriptInterface("AndroidLocation");webView.removeJavascriptInterface("AndroidNavigation");webView.destroy();super.onDestroy();}
+    private boolean isOnline(){ConnectivityManager cm=(ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);Network network=cm.getActiveNetwork();NetworkCapabilities caps=network==null?null:cm.getNetworkCapabilities(network);return caps!=null&&caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)&&caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);}
+    private void registerNetworkObserver(){connectivityManager=(ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);networkCallback=new ConnectivityManager.NetworkCallback(){@Override public void onAvailable(@NonNull Network network){publishNetworkState(true);}@Override public void onLost(@NonNull Network network){publishNetworkState(isOnline());}@Override public void onCapabilitiesChanged(@NonNull Network network,@NonNull NetworkCapabilities capabilities){publishNetworkState(capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)&&capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED));}};connectivityManager.registerDefaultNetworkCallback(networkCallback);publishNetworkState(isOnline());}
+    private void publishNetworkState(boolean online){webView.post(()->{webView.getSettings().setCacheMode(online?WebSettings.LOAD_DEFAULT:WebSettings.LOAD_CACHE_ELSE_NETWORK);webView.evaluateJavascript("window.__adimaxNativeOnline="+online+";window.dispatchEvent(new Event('"+(online?"online":"offline")+"'));",null);});}
     private boolean isLocal(String h){return "10.0.2.2".equals(h)||"127.0.0.1".equals(h)||"localhost".equalsIgnoreCase(h);}
     private boolean internal(Uri u){Uri b=Uri.parse(BuildConfig.APP_URL);return u.getHost()!=null&&u.getHost().equalsIgnoreCase(b.getHost())&&("https".equalsIgnoreCase(u.getScheme())||isLocal(u.getHost()));}
     private void saveNavigationUrl(String url){if(url==null)return;Uri current=Uri.parse(url);if(internal(current)&&current.getPath()!=null&&current.getPath().startsWith("/routes"))getSharedPreferences("driver_navigation",MODE_PRIVATE).edit().putString("last_route_url",url).apply();}

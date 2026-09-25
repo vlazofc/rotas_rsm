@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import FINANCE_ACCOUNTS_MANAGE, FINANCE_VIEW, ROLE_EQUIVALENTS, Role, require_branch_access, require_permission, require_roles, scope_by_branch
-from app.db.models import Attachment, Branch, ContentItem, Driver, DriverSettings, DriverStatementAdjustment, DriverStatementPeriod, Expense, FinancialAccount, FinancialCategory, MaintenanceOrder, OccurrenceCategory, Part, PurchaseItem, PurchaseTicket, Revenue, Route, RouteOccurrence, RouteOccurrenceEvent, RouteStop, StockMovement, Supplier, User, Vehicle, WorkflowTask, WorkflowTaskEvent
+from app.db.models import Attachment, Branch, CarrierUser, ContentItem, Driver, DriverSettings, DriverStatementAdjustment, DriverStatementPeriod, Expense, FinancialAccount, FinancialCategory, MaintenanceOrder, OccurrenceCategory, Part, PurchaseItem, PurchaseTicket, Revenue, Route, RouteOccurrence, RouteOccurrenceEvent, RouteStop, StockMovement, Supplier, User, Vehicle, WorkflowTask, WorkflowTaskEvent
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log
@@ -37,6 +37,24 @@ DEFAULT_OCCURRENCE_CATEGORIES = (
     ("avaria", "Avaria"), ("acidente", "Acidente"), ("atraso", "Atraso"),
     ("seguranca", "Segurança"), ("outros", "Outros"),
 )
+
+def _carrier_membership(db: Session, user: User) -> CarrierUser | None:
+    return db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+
+def _require_adimax_category_management(db: Session, user: User) -> None:
+    if _carrier_membership(db, user) is not None:
+        raise HTTPException(403, "Categorias de ocorrências são administradas exclusivamente pela Adimax.")
+
+def _require_carrier_route(db: Session, user: User, route: Route) -> None:
+    membership = _carrier_membership(db, user)
+    if membership is not None and route.carrier_id != membership.carrier_id:
+        raise HTTPException(404, "Rota não encontrada.")
+
+def _require_carrier_occurrence(db: Session, user: User, row: RouteOccurrence) -> None:
+    route = db.get(Route, row.route_id)
+    if route is None:
+        raise HTTPException(404, "Ocorrência não encontrada.")
+    _require_carrier_route(db, user, route)
 
 class ContentIn(BaseModel):
     branch_id: int | None = None
@@ -145,6 +163,8 @@ def occurrences(db: Session = Depends(get_db), user: User = Depends(get_current_
             .outerjoin(Driver, Driver.id == RouteOccurrence.driver_id).order_by(RouteOccurrence.created_at.desc()))
     if user.role != Role.MOTORISTA.value:
         stmt = scope_by_branch(stmt, RouteOccurrence.branch_id, user, db)
+    membership = _carrier_membership(db, user)
+    if membership is not None: stmt = stmt.where(Route.carrier_id == membership.carrier_id)
     if user.role == Role.MOTORISTA.value: stmt = stmt.where(RouteOccurrence.reported_by == user.id)
     rows = db.execute(stmt).all()
     assignees = {item.id: item.name for item in db.scalars(select(User).where(User.id.in_([o.assigned_to_id for o, *_ in rows if o.assigned_to_id]))).all()}
@@ -163,6 +183,7 @@ def occurrences(db: Session = Depends(get_db), user: User = Depends(get_current_
 async def upload_occurrence_evidence(occurrence_id: int, evidence: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     row = db.get(RouteOccurrence, occurrence_id)
     if row is None: raise HTTPException(404, "Ocorrência não encontrada.")
+    _require_carrier_occurrence(db, user, row)
     require_branch_access(db, user, row.branch_id)
     if not _can_manage_occurrence(user, row): raise HTTPException(403, "Sem permissão para evidenciar esta ocorrência.")
     content_type = evidence.content_type or "application/octet-stream"
@@ -222,6 +243,7 @@ def _require_occurrence_category(db: Session, tenant_id: int | None, code: str, 
 
 @router.get("/occurrence-categories", response_model=list[OccurrenceCategoryOut], dependencies=[Depends(_OCCURRENCE_ACCESS)])
 def occurrence_categories(include_inactive: bool = False, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if _carrier_membership(db, user) is not None: include_inactive = False
     _ensure_occurrence_categories(db, user.tenant_id)
     stmt = select(OccurrenceCategory).where(OccurrenceCategory.tenant_id == user.tenant_id)
     if not include_inactive: stmt = stmt.where(OccurrenceCategory.active.is_(True))
@@ -231,6 +253,7 @@ def occurrence_categories(include_inactive: bool = False, db: Session = Depends(
 
 @router.post("/occurrence-categories", response_model=OccurrenceCategoryOut, status_code=201, dependencies=[Depends(_MANAGER)])
 def create_occurrence_category(data: OccurrenceCategoryIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_adimax_category_management(db, user)
     if user.tenant_id is None: raise HTTPException(422, "Empresa não identificada.")
     code = _occurrence_category_code(data.name)
     existing = db.scalar(select(OccurrenceCategory).where(OccurrenceCategory.tenant_id == user.tenant_id, OccurrenceCategory.code == code))
@@ -246,6 +269,7 @@ def create_occurrence_category(data: OccurrenceCategoryIn, db: Session = Depends
 
 @router.put("/occurrence-categories/{category_id}", response_model=OccurrenceCategoryOut, dependencies=[Depends(_MANAGER)])
 def update_occurrence_category(category_id: int, data: OccurrenceCategoryIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_adimax_category_management(db, user)
     row = db.get(OccurrenceCategory, category_id)
     if row is None or row.tenant_id != user.tenant_id: raise HTTPException(404, "Categoria não encontrada.")
     row.name = data.name.strip()
@@ -254,6 +278,7 @@ def update_occurrence_category(category_id: int, data: OccurrenceCategoryIn, db:
 
 @router.put("/occurrence-categories/{category_id}/toggle", response_model=OccurrenceCategoryOut, dependencies=[Depends(_MANAGER)])
 def toggle_occurrence_category(category_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_adimax_category_management(db, user)
     row = db.get(OccurrenceCategory, category_id)
     if row is None or row.tenant_id != user.tenant_id: raise HTTPException(404, "Categoria não encontrada.")
     row.active = not row.active
@@ -272,6 +297,7 @@ class OccurrenceIn(BaseModel):
 def create_occurrence(data: OccurrenceIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = db.get(Route, data.route_id)
     if route is None: raise HTTPException(404, "Rota não encontrada.")
+    _require_carrier_route(db, user, route)
     require_branch_access(db, user, route.branch_id)
     _require_occurrence_category(db, route.tenant_id, data.category)
     if data.severity not in {"baixa", "media", "alta", "critica"}: raise HTTPException(400, "Gravidade inválida.")
@@ -332,12 +358,14 @@ def _can_manage_occurrence(user: User, row: RouteOccurrence) -> bool:
 def update_occurrence(occurrence_id: int, data: OccurrenceUpdateIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     row = db.get(RouteOccurrence, occurrence_id)
     if row is None: raise HTTPException(404, "Ocorrência não encontrada.")
+    _require_carrier_occurrence(db, user, row)
     require_branch_access(db, user, row.branch_id)
     if not _can_manage_occurrence(user, row): raise HTTPException(403, "Sem permissão para alterar esta ocorrência.")
     if user.role == Role.MOTORISTA.value and row.status != "aberta": raise HTTPException(409, "Somente ocorrências abertas podem ser alteradas pelo motorista.")
     if data.route_id is not None and data.route_id != row.route_id:
         route = db.get(Route, data.route_id)
         if route is None: raise HTTPException(404, "Rota não encontrada.")
+        _require_carrier_route(db, user, route)
         require_branch_access(db, user, route.branch_id)
         if user.role == Role.MOTORISTA.value:
             driver = db.scalar(select(Driver).where(Driver.user_id == user.id))
@@ -378,6 +406,7 @@ def update_occurrence(occurrence_id: int, data: OccurrenceUpdateIn, db: Session 
 def occurrence_history(occurrence_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     row = db.get(RouteOccurrence, occurrence_id)
     if row is None: raise HTTPException(404, "Ocorrência não encontrada.")
+    _require_carrier_occurrence(db, user, row)
     require_branch_access(db, user, row.branch_id)
     if user.role == Role.MOTORISTA.value and row.reported_by != user.id: raise HTTPException(403, "Ocorrência de outro motorista.")
     events = db.execute(select(RouteOccurrenceEvent, User.name).outerjoin(User, User.id == RouteOccurrenceEvent.actor_id)
@@ -390,6 +419,7 @@ def occurrence_history(occurrence_id: int, db: Session = Depends(get_db), user: 
 def delete_occurrence(occurrence_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     row = db.get(RouteOccurrence, occurrence_id)
     if row is None: raise HTTPException(404, "Ocorrência não encontrada.")
+    _require_carrier_occurrence(db, user, row)
     require_branch_access(db, user, row.branch_id)
     if not _can_manage_occurrence(user, row): raise HTTPException(403, "Sem permissão para excluir esta ocorrência.")
     if user.role == Role.MOTORISTA.value and row.status != "aberta": raise HTTPException(409, "Somente ocorrências abertas podem ser excluídas pelo motorista.")

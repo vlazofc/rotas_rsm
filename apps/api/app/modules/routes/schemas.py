@@ -107,6 +107,7 @@ def _truncate_origin_address(v: str | None) -> str | None:
 
 class RouteIn(BaseModel):
     branch_id: int
+    carrier_id: int | None = None
     codigo_ut: str
     route_date: date
     origin_name: str | None = None
@@ -146,6 +147,11 @@ class RouteUpdate(BaseModel):
 class RouteAssignmentIn(BaseModel):
     driver_id: int | None = None
     vehicle_id: int | None = None
+
+
+class RouteCarrierChangeIn(BaseModel):
+    carrier_id: int
+    reason: str = Field(min_length=5, max_length=2000)
 
 
 class RouteObservationIn(BaseModel):
@@ -192,6 +198,9 @@ class EventOut(BaseModel):
 class RouteOut(BaseModel):
     id: int
     branch_id: int
+    carrier_id: int | None = None
+    carrier_assignment_status: str = "pending_carrier"
+    carrier_assignment_issue: str | None = None
     codigo_ut: str
     route_date: date
     origin_name: str | None

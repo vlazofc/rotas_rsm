@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.core.permissions import Role, require_branch_access, require_roles
 from app.core.config import settings
-from app.db.models import Branch, User
+from app.db.models import Branch, Carrier, CarrierBranch, User
 from app.db.session import get_db
+from app.modules.auth.deps import get_current_user
 from app.services.audit import log
 from app.services.generic_route_import import import_generic_routes
 from app.services.import_changes import ImportConfirmationRequired
@@ -59,11 +60,19 @@ class ImportResult(BaseModel):
     customers_created: int = 0
     destinations_created: int = 0
     origins_created: int = 0
+    carrier_pending: int = 0
 
 
 @router.get("/template.xlsx", dependencies=[Depends(_MANAGER)])
-def download_template():
-    output = build_jm_template_xlsx()
+def download_template(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    branch_id = _resolve_import_branch(db, user)
+    carriers = db.execute(
+        select(Carrier.id, Carrier.name)
+        .join(CarrierBranch, CarrierBranch.carrier_id == Carrier.id)
+        .where(CarrierBranch.branch_id == branch_id, CarrierBranch.active.is_(True), Carrier.active.is_(True))
+        .order_by(Carrier.name)
+    ).all()
+    output = build_jm_template_xlsx([(row.id, row.name) for row in carriers])
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

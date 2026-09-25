@@ -27,7 +27,7 @@ th { background: #202a3c; color: white; text-align: left; }
 th, td { border: 1px solid #cfd5df; padding: 6px 7px; vertical-align: top; }
 tr:nth-child(even) td { background: #f7f8fa; }
 code { background: #eef1f5; border-radius: 3px; padding: 1px 4px; font-size: 9pt; }
-img { display: block; max-width: 72mm; max-height: 155mm; object-fit: contain; margin: 14px auto; border: 1px solid #d7dce4; border-radius: 12px; box-shadow: 0 5px 18px #0002; }
+img { display: block; max-width: 100%; max-height: 170mm; object-fit: contain; margin: 14px auto; border: 1px solid #d7dce4; border-radius: 12px; box-shadow: 0 5px 18px #0002; }
 strong { color: #111827; }
 @media print { a { color: inherit; text-decoration: none; } h2 { break-before: auto; } }
 '@

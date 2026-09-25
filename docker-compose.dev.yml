@@ -15,7 +15,20 @@ services:
       - "8088:80"            # http://localhost:8088
 
   api:
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    env_file:
+      - .env.local.example
+    # Replica localmente o modelo multiprocesso de produção. Hot reload não é
+    # apropriado para ensaio de carga: reinícios durante o teste distorcem os dados.
+    command: >
+      gunicorn app.main:app
+      -k uvicorn.workers.UvicornWorker
+      --workers ${API_WORKERS:-4}
+      --bind 0.0.0.0:8000
+      --keep-alive 10
+      --timeout 120
+      --graceful-timeout 30
+      --max-requests 5000
+      --max-requests-jitter 500
     environment:
       APP_ENV: development
       ALLOWED_ORIGINS: http://localhost:5173,http://localhost:8088
@@ -24,15 +37,50 @@ services:
     ports:
       - "8000:8000"          # http://localhost:8000/docs
 
+  worker:
+    env_file:
+      - .env.local.example
+
+  scheduler:
+    env_file:
+      - .env.local.example
+
   postgres:
+    env_file:
+      - .env.local.example
     ports:
       - "5433:5432"          # porta local 5433 (5432 ocupada pelo PostgreSQL local do Windows)
 
   redis:
+    env_file:
+      - .env.local.example
     ports:
       - "6379:6379"
 
   minio:
+    env_file:
+      - .env.local.example
     ports:
       - "9000:9000"
       - "9001:9001"          # console MinIO http://localhost:9001
+
+  backup:
+    env_file:
+      - .env.local.example
+
+  minio-backup:
+    env_file:
+      - .env.local.example
+
+# Volumes locais isolados: o teste nunca reutiliza os dados da stack principal.
+volumes:
+  postgres_data:
+    name: adimax_local_postgres_data
+  redis_data:
+    name: adimax_local_redis_data
+  minio_data:
+    name: adimax_local_minio_data
+  caddy_data:
+    name: adimax_local_caddy_data
+  caddy_config:
+    name: adimax_local_caddy_config

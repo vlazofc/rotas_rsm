@@ -3,8 +3,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import Role, has_all_environment_access, require_roles, require_same_tenant
-from app.db.models import Branch, Driver, DriverBranch, Route, User, Vehicle
+from app.core.permissions import Role, has_all_environment_access, require_internal_permission, require_internal_roles, require_roles, require_same_tenant
+from app.db.models import Branch, CarrierBranch, CarrierUser, Driver, DriverBranch, Route, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
@@ -36,12 +36,20 @@ class BranchOut(BranchIn):
 @router.get("", response_model=list[BranchOut])
 def list_branches(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stmt = select(Branch).order_by(Branch.name)
-    if not has_all_environment_access(user):
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+    acting_carrier_id = getattr(user, "acting_carrier_id", None) if user.role == Role.ADMIN_GLOBAL.value else None
+    effective_carrier_id = membership.carrier_id if membership is not None else acting_carrier_id
+    if effective_carrier_id is not None:
+        stmt = stmt.join(CarrierBranch, CarrierBranch.branch_id == Branch.id).where(CarrierBranch.carrier_id == effective_carrier_id, CarrierBranch.active.is_(True))
+    elif user.role == Role.MOTORISTA.value:
+        driver_ids = select(Driver.id).where(Driver.user_id == user.id)
+        stmt = stmt.join(DriverBranch, DriverBranch.branch_id == Branch.id).where(DriverBranch.driver_id.in_(driver_ids), DriverBranch.active.is_(True))
+    elif not has_all_environment_access(user):
         stmt = stmt.where(Branch.tenant_id == user.tenant_id)
     return db.scalars(stmt).all()
 
 
-@router.post("", response_model=BranchOut, dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
+@router.post("", response_model=BranchOut, dependencies=[Depends(require_internal_permission("module.branches", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
 def create_branch(data: BranchIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     tenant_id = data.tenant_id if actor.role == Role.ADMIN_GLOBAL.value else actor.tenant_id
     if tenant_id is None:
@@ -49,15 +57,15 @@ def create_branch(data: BranchIn, db: Session = Depends(get_db), actor: User = D
     branch = Branch(**data.model_dump(exclude={"tenant_id"}), tenant_id=tenant_id)
     db.add(branch)
     db.flush()
-    driver_ids = db.scalars(select(Driver.id).where(Driver.tenant_id == tenant_id)).all()
-    db.add_all(DriverBranch(driver_id=driver_id, branch_id=branch.id) for driver_id in driver_ids)
+    # Uma filial nova não herda transportadoras, motoristas ou veículos.
+    # Cada vínculo precisa ser liberado explicitamente pelo administrador.
     log(db, user_id=actor.id, action="create", entity="branch", entity_id=branch.id)
     db.commit()
     db.refresh(branch)
     return branch
 
 
-@router.put("/{branch_id}", response_model=BranchOut, dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
+@router.put("/{branch_id}", response_model=BranchOut, dependencies=[Depends(require_internal_permission("module.branches", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
 def update_branch(branch_id: int, data: BranchUpdate,
                   db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     branch = db.get(Branch, branch_id)

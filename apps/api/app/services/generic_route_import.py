@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Branch, Driver, Route, RouteStop, Vehicle
 from app.db.session import SessionLocal
 from app.services.import_changes import snapshot_import, collect_changes, authorize_changes
+from app.services.route_carrier import apply_import_carrier, resolve_import_carrier
 
 # Cabeçalho humano (o que aparece no modelo baixável) -> chave canônica interna.
 TEMPLATE_COLUMNS: dict[str, str] = {
@@ -44,6 +45,8 @@ TEMPLATE_COLUMNS: dict[str, str] = {
     "PALETES": "pallets",
     "MOTORISTA": "motorista",
     "PLACA": "placa",
+    "ID TRANSPORTADORA": "carrier_id",
+    "TRANSPORTADORA": "carrier_name",
     "OBSERVACOES": "notes",
 }
 REQUIRED_COLUMNS = ("DATA ROTA", "ROTA", "DESTINO")
@@ -51,7 +54,7 @@ REQUIRED_COLUMNS = ("DATA ROTA", "ROTA", "DESTINO")
 EXAMPLE_ROW = [
     "2026-07-01", "ROTA 1", "Rod. Adimax, 1000, Salto de Pirapora - SP", "12345", "Cliente Exemplo Ltda", "Cliente Exemplo Ltda - Filial Centro",
     "Av. Paulista, 1000", "01310-100", "São Paulo", "Bela Vista", "150.5", "3", "1",
-    "João da Silva", "ABC1D23", "Entregar até 12h",
+    "João da Silva", "ABC1D23", "1", "Transportadora Alfa", "Entregar até 12h",
 ]
 
 
@@ -229,7 +232,7 @@ def import_generic_routes(source, filename: str, branch_id: int, *, confirmed: b
 
     stats = {"rows_read": len(rows), "routes_created": 0, "routes_updated": 0,
               "stops_created": 0, "stops_updated": 0, "routes_optimized": 0,
-              "routing_errors": 0, "route_ids": [], "errors": []}
+              "routing_errors": 0, "carrier_pending": 0, "route_ids": [], "errors": []}
 
     with SessionLocal() as db:
         changes = []
@@ -263,7 +266,6 @@ def import_generic_routes(source, filename: str, branch_id: int, *, confirmed: b
             if is_new_route:
                 route.status = "planejada"
             route.origin_address = parse_str(base.get("origin_address")) or route.origin_address
-
             if is_new_route:
                 driver_name = parse_str(base.get("motorista"))
                 plate = normalize_plate(parse_str(base.get("placa")))
@@ -273,6 +275,14 @@ def import_generic_routes(source, filename: str, branch_id: int, *, confirmed: b
                 if vehicle: route.vehicle_id = vehicle.id
 
             collect_changes(changes, before_route, route, rota_label)
+            carrier, carrier_issue = resolve_import_carrier(
+                db, branch.id, carrier_id=parse_int(base.get("carrier_id")),
+                name=parse_str(base.get("carrier_name")),
+            )
+            apply_import_carrier(route, carrier, carrier_issue)
+            if carrier_issue:
+                stats["carrier_pending"] += 1
+                stats["errors"].append(f"Rota {rota_label}: {carrier_issue}")
             db.flush()
             stats["route_ids"].append(route.id)
             stats["routes_created" if is_new_route else "routes_updated"] += 1

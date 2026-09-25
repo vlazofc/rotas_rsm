@@ -1,17 +1,18 @@
 """Arrendatários/beneficiários e autorização por veículo/placa."""
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from app.core.permissions import Role, require_roles
-from app.db.models import Carrier, CarrierVehicleLink, Driver, Tenant, User, Vehicle
+from app.core.permissions import Role, require_internal_permission, require_internal_roles, require_roles
+from app.db.models import Carrier, CarrierUser, CarrierVehicleLink, Driver, Route, Tenant, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
+from app.services.documents import normalize_document
 
 router = APIRouter(prefix="/carriers", tags=["carriers"])
-_MANAGER = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)
+_MANAGER = require_internal_permission("module.carriers", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)
 
 class CarrierData(BaseModel):
     name: str | None = None
@@ -31,6 +32,7 @@ class CarrierData(BaseModel):
     antt_expiry_date: date | None = None
     vehicle_ids: list[int] | None = None
     active: bool | None = None
+    max_masters: int | None = Field(default=None, ge=1, le=20)
 
 class CarrierIn(CarrierData):
     name: str
@@ -66,6 +68,7 @@ class CarrierOut(BaseModel):
     antt_number: str | None
     antt_expiry_date: date | None
     active: bool
+    max_masters: int | None = None
     vehicles: list[VehicleLinkOut]
 
 def _scope(carrier: Carrier, actor: User) -> None:
@@ -85,6 +88,15 @@ def _validate(data: CarrierData, current: Carrier | None = None) -> None:
         raise HTTPException(422, detail=f"Informe um {'CPF' if expected == 11 else 'CNPJ'} com {expected} dígitos.")
     if data.vehicle_ids and not (antt or "").strip():
         raise HTTPException(422, detail="Informe a ANTT/RNTRC para liberar o responsável nas placas selecionadas.")
+
+def _ensure_unique_document(db: Session, document: str | None, current_id: int | None = None) -> str | None:
+    if document is None:
+        return None
+    normalized = normalize_document(document)
+    for carrier in db.scalars(select(Carrier).where(Carrier.id != (current_id or -1))).all():
+        if normalize_document(carrier.document) == normalized:
+            raise HTTPException(409, detail="CPF/CNPJ já cadastrado em outro responsável.")
+    return normalized
 
 def _vehicle_links(db: Session, carrier: Carrier) -> list[VehicleLinkOut]:
     rows = db.execute(select(Vehicle, CarrierVehicleLink).join(CarrierVehicleLink, CarrierVehicleLink.vehicle_id == Vehicle.id).where(CarrierVehicleLink.carrier_id == carrier.id).order_by(Vehicle.plate)).all()
@@ -117,8 +129,16 @@ def _sync_vehicles(db: Session, carrier: Carrier, vehicle_ids: list[int], actor:
 @router.get("", response_model=list[CarrierOut])
 def list_carriers(only_active: bool = False, tenant_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stmt = select(Carrier)
-    if user.role == Role.ADMIN_GLOBAL.value:
-        if tenant_id is not None: stmt = stmt.where(Carrier.tenant_id == tenant_id)
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+    if membership is not None:
+        stmt = stmt.where(Carrier.id == membership.carrier_id)
+    elif user.role == Role.MOTORISTA.value:
+        driver_ids = select(Driver.id).where(Driver.user_id == user.id)
+        stmt = stmt.where(Carrier.id.in_(select(Route.carrier_id).where(Route.driver_id.in_(driver_ids))))
+    elif user.role == Role.ADMIN_GLOBAL.value:
+        acting_carrier_id = getattr(user, "acting_carrier_id", None)
+        if acting_carrier_id is not None: stmt = stmt.where(Carrier.id == acting_carrier_id)
+        elif tenant_id is not None: stmt = stmt.where(Carrier.tenant_id == tenant_id)
     else: stmt = stmt.where(Carrier.tenant_id == user.tenant_id)
     if only_active: stmt = stmt.where(Carrier.active.is_(True))
     return [_out(db, item) for item in db.scalars(stmt.order_by(Carrier.name)).all()]
@@ -128,6 +148,7 @@ def create_carrier(data: CarrierIn, db: Session = Depends(get_db), actor: User =
     tenant_id = data.tenant_id if actor.role == Role.ADMIN_GLOBAL.value else actor.tenant_id
     if tenant_id is None or db.get(Tenant, tenant_id) is None: raise HTTPException(422, detail="Selecione uma empresa válida.")
     _validate(data); fields = data.model_dump(exclude={"vehicle_ids", "tenant_id", "active"})
+    fields["document"] = _ensure_unique_document(db, data.document)
     carrier = Carrier(**fields, tenant_id=tenant_id, active=True); db.add(carrier); db.flush()
     _sync_vehicles(db, carrier, data.vehicle_ids, actor)
     log(db, user_id=actor.id, action="create", entity="carrier", entity_id=carrier.id, detail=f'name: "{carrier.name}"; document: "{carrier.document}"; ANTT: "{carrier.antt_number or "-"}"')
@@ -138,6 +159,7 @@ def update_carrier(carrier_id: int, data: CarrierData, db: Session = Depends(get
     carrier = db.get(Carrier, carrier_id)
     if carrier is None: raise HTTPException(404, detail="Arrendatário/beneficiário não encontrado.")
     _scope(carrier, actor); _validate(data, carrier); updates = data.model_dump(exclude_unset=True, exclude={"vehicle_ids"}); before = snapshot(carrier, list(updates))
+    if "document" in updates: updates["document"] = _ensure_unique_document(db, updates["document"], carrier.id)
     for field, value in updates.items(): setattr(carrier, field, value)
     if data.vehicle_ids is not None: _sync_vehicles(db, carrier, data.vehicle_ids, actor)
     log_update(db, user_id=actor.id, entity="carrier", entity_id=carrier.id, before=before, obj=carrier, updates=updates)

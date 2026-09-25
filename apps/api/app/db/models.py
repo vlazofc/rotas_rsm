@@ -53,6 +53,7 @@ class Tenant(Base, TimestampMixin):
     feature_route_optimization: Mapped[bool] = mapped_column(Boolean, default=True)
     feature_km_calculation: Mapped[bool] = mapped_column(Boolean, default=True)
     help_assistant_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_carrier_masters: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
     # Conta SaaS — plano, mensalidade e controle interno de vencimento.
     billing_plan: Mapped[str | None] = mapped_column(String(60), nullable=True)
     billing_amount: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
@@ -85,7 +86,7 @@ class Branch(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     tenant: Mapped[Tenant | None] = relationship(back_populates="branches")
-    users: Mapped[list[User]] = relationship(back_populates="branch")
+    users: Mapped[list[User]] = relationship(back_populates="branch", foreign_keys="User.branch_id")
 
 
 class User(Base, TimestampMixin):
@@ -108,9 +109,11 @@ class User(Base, TimestampMixin):
     blocked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     navigation_layout: Mapped[str] = mapped_column(String(20), default="sidebar", server_default="sidebar")
+    acting_branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), nullable=True)
+    acting_carrier_id: Mapped[int | None] = mapped_column(ForeignKey("carriers.id"), nullable=True)
 
     tenant: Mapped[Tenant | None] = relationship(back_populates="users")
-    branch: Mapped[Branch | None] = relationship(back_populates="users")
+    branch: Mapped[Branch | None] = relationship(back_populates="users", foreign_keys=[branch_id])
 
 
 class RoleProfile(Base, TimestampMixin):
@@ -146,6 +149,7 @@ class Carrier(Base, TimestampMixin):
     antt_number: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     antt_expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_masters: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class CarrierVehicleLink(Base, TimestampMixin):
@@ -157,6 +161,69 @@ class CarrierVehicleLink(Base, TimestampMixin):
     vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"), index=True, unique=True)
     antt_authorized: Mapped[bool] = mapped_column(Boolean, default=True)
     freight_beneficiary: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class CarrierBranch(Base, TimestampMixin):
+    """Filiais Adimax que autorizaram uma transportadora a operar."""
+    __tablename__ = "carrier_branches"
+    __table_args__ = (UniqueConstraint("carrier_id", "branch_id", name="uq_carrier_branch"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    carrier_id: Mapped[int] = mapped_column(ForeignKey("carriers.id", ondelete="CASCADE"), index=True)
+    branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id", ondelete="CASCADE"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class CarrierMaster(Base, TimestampMixin):
+    """Masters pertencem à transportadora, não a uma filial (máximo 3 ativos)."""
+    __tablename__ = "carrier_masters"
+    __table_args__ = (
+        UniqueConstraint("carrier_id", "user_id", name="uq_carrier_master"),
+        UniqueConstraint("user_id", name="uq_carrier_master_user"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    carrier_id: Mapped[int] = mapped_column(ForeignKey("carriers.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    is_first_master: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+
+class CarrierUser(Base, TimestampMixin):
+    """Vínculo de acesso de qualquer usuário operacional à transportadora."""
+    __tablename__ = "carrier_users"
+    __table_args__ = (
+        UniqueConstraint("carrier_id", "user_id", name="uq_carrier_user"),
+        UniqueConstraint("user_id", name="uq_carrier_user_account"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    carrier_id: Mapped[int] = mapped_column(ForeignKey("carriers.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+
+
+class BranchApprovalPolicy(Base, TimestampMixin):
+    """Exigências graduais de aprovação configuradas por filial."""
+    __tablename__ = "branch_approval_policies"
+    __table_args__ = (UniqueConstraint("branch_id", name="uq_branch_approval_policy"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id", ondelete="CASCADE"), index=True)
+    require_driver_approval: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    require_vehicle_approval: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+
+class UserBranchAccess(Base, TimestampMixin):
+    """Escopo explícito de filial para colaboradores Adimax e usuários da transportadora."""
+    __tablename__ = "user_branch_access"
+    __table_args__ = (UniqueConstraint("user_id", "branch_id", name="uq_user_branch_access"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id", ondelete="CASCADE"), index=True)
+
+
+class UserAccessPolicy(Base, TimestampMixin):
+    __tablename__ = "user_access_policies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
+    all_branches_including_future: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
 
 class Customer(Base, TimestampMixin):
@@ -262,6 +329,25 @@ class DriverBranch(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     driver_id: Mapped[int] = mapped_column(ForeignKey("drivers.id", ondelete="CASCADE"), index=True)
     branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id", ondelete="CASCADE"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    approval_status: Mapped[str] = mapped_column(String(20), default="approved", server_default="approved")
+    approval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VehicleBranch(Base, TimestampMixin):
+    """Disponibilidade e aprovação do veículo em cada filial autorizada."""
+    __tablename__ = "vehicle_branches"
+    __table_args__ = (UniqueConstraint("vehicle_id", "branch_id", name="uq_vehicle_branch"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"), index=True)
+    branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id", ondelete="CASCADE"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    approval_status: Mapped[str] = mapped_column(String(20), default="approved", server_default="approved")
+    approval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DriverSettings(Base, TimestampMixin):
@@ -279,6 +365,7 @@ class VehicleOwner(Base, TimestampMixin):
     __tablename__ = "vehicle_owners"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    carrier_id: Mapped[int | None] = mapped_column(ForeignKey("carriers.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(160))
     document: Mapped[str] = mapped_column(EncryptedText("vehicle_owners.document"), index=True)
     person_type: Mapped[str] = mapped_column(String(20), default="pessoa_fisica")
@@ -529,6 +616,9 @@ class Route(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id"), index=True)
+    carrier_id: Mapped[int | None] = mapped_column(ForeignKey("carriers.id"), nullable=True, index=True)
+    carrier_assignment_status: Mapped[str] = mapped_column(String(30), default="pending_carrier", server_default="pending_carrier", index=True)
+    carrier_assignment_issue: Mapped[str | None] = mapped_column(Text, nullable=True)
     codigo_ut: Mapped[str] = mapped_column(String(40), index=True)
     route_date: Mapped[date] = mapped_column(Date)
     origin_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
@@ -603,6 +693,22 @@ class RouteObservation(Base, TimestampMixin):
     text: Mapped[str] = mapped_column(Text)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     route: Mapped["Route"] = relationship(back_populates="observations")
+
+
+class RouteCarrierChange(Base):
+    """Log imutável da troca da transportadora executora."""
+    __tablename__ = "route_carrier_changes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    route_id: Mapped[int] = mapped_column(ForeignKey("routes.id"), index=True)
+    branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id"), index=True)
+    previous_carrier_id: Mapped[int | None] = mapped_column(ForeignKey("carriers.id"), nullable=True)
+    new_carrier_id: Mapped[int] = mapped_column(ForeignKey("carriers.id"))
+    changed_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reason: Mapped[str] = mapped_column(Text)
+    previous_driver_id: Mapped[int | None] = mapped_column(ForeignKey("drivers.id"), nullable=True)
+    previous_vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id"), nullable=True)
+    route_status: Mapped[str] = mapped_column(String(30))
 
 
 class RouteStop(Base, TimestampMixin):
@@ -743,6 +849,16 @@ class RouteEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     route: Mapped[Route] = relationship(back_populates="events")
+
+
+class ClientActionReceipt(Base):
+    """Comprovante de idempotência para ações reenviadas pelo aplicativo offline."""
+    __tablename__ = "client_action_receipts"
+    action_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    method: Mapped[str] = mapped_column(String(10))
+    path: Mapped[str] = mapped_column(String(300))
+    status_code: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class Checkin(Base):

@@ -36,6 +36,15 @@ interface LoadPoint {
   paletes: number;
 }
 
+interface CarrierVolume {
+  carrier_id: number | null;
+  transportadora: string;
+  rotas: number;
+  entregas: number;
+}
+
+interface CarrierOption { id: number; nome: string; }
+
 interface DashboardSummary {
   rotas_total: number;
   rotas_abertas: number;
@@ -69,6 +78,10 @@ interface DashboardSummary {
   serie_entregas: SeriesPoint[];
   serie_tempos: TimePoint[];
   serie_carga: LoadPoint[];
+  pode_filtrar_transportadoras: boolean;
+  filtro_transportadora_id: number | null;
+  transportadoras_disponiveis: CarrierOption[];
+  volumetria_transportadoras: CarrierVolume[];
 }
 
 export default function Dashboard() {
@@ -76,6 +89,7 @@ export default function Dashboard() {
   const [period, setPeriod] = useState<PeriodFilter>("day");
   const [routeFilter, setRouteFilter] = useState<RouteFilter>("open");
   const [selectedWeek, setSelectedWeek] = useState(currentWeekValue());
+  const [carrierId, setCarrierId] = useState("");
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const periodLabels: Record<PeriodFilter, string> = {
@@ -92,14 +106,14 @@ export default function Dashboard() {
   const load = (showLoading: boolean) => {
     if (showLoading) setLoading(true);
     return api.get<DashboardSummary>("/dashboard/summary", {
-      params: { range: period, status: routeFilter, period_ref: period === "week" ? selectedWeek : undefined },
+      params: { range: period, status: routeFilter, period_ref: period === "week" ? selectedWeek : undefined, carrier_id: carrierId || undefined },
     })
       .then((r) => setData(r.data))
       .catch(() => { if (showLoading) setData(null); })
       .finally(() => { if (showLoading) setLoading(false); });
   };
 
-  useEffect(() => { load(true); }, [period, routeFilter, selectedWeek]);
+  useEffect(() => { load(true); }, [period, routeFilter, selectedWeek, carrierId]);
 
   // Mantém os indicadores atualizados sem exigir F5.
   usePolling(() => load(false), REFRESH_INTERVAL_MS);
@@ -141,6 +155,8 @@ export default function Dashboard() {
     return Math.max(1, ...values);
   }, [data]);
 
+  const maxCarrierVolume = useMemo(() => Math.max(1, ...(data?.volumetria_transportadoras.map((item) => Math.max(item.rotas, item.entregas)) ?? [1])), [data]);
+
   return (
     <div>
       <div className="page-header dashboard-header dashboard-hero">
@@ -150,6 +166,15 @@ export default function Dashboard() {
           <p className="page-subtitle">{t("dashboard.subtitle")}</p>
         </div>
         <div className="dashboard-controls">
+          {data?.pode_filtrar_transportadoras && (
+            <label className="dashboard-carrier-filter">
+              <span>Transportadora</span>
+              <select value={carrierId} onChange={(event) => setCarrierId(event.target.value)}>
+                <option value="">Todas</option>
+                {data.transportadoras_disponiveis.map((carrier) => <option key={carrier.id} value={carrier.id}>{carrier.nome}</option>)}
+              </select>
+            </label>
+          )}
           <SegmentedControl
             value={routeFilter}
             labels={routeFilterLabels}
@@ -374,6 +399,30 @@ export default function Dashboard() {
               {failureTotal === 0 && <div className="empty-state">{t("dashboard.empty.failure_reasons")}</div>}
             </div>
           </section>
+
+          {data.pode_filtrar_transportadoras && (
+            <section className="card-panel dashboard-chart-card chart-wide carrier-volume-card">
+              <div className="chart-head">
+                <div>
+                  <h3>Volumetria por transportadora</h3>
+                  <p>Quantidade de rotas e entregas conforme os filtros selecionados.</p>
+                </div>
+              </div>
+              <div className="carrier-volume-list">
+                {data.volumetria_transportadoras.map((item) => (
+                  <div className="carrier-volume-row" key={item.carrier_id ?? "unassigned"}>
+                    <strong title={item.transportadora}>{item.transportadora}</strong>
+                    <div className="carrier-volume-bars">
+                      <span><i className="bar-routes" style={{ width: `${widthFor(item.rotas, maxCarrierVolume)}%` }} /><em>{item.rotas} rota(s)</em></span>
+                      <span><i className="bar-deliveries" style={{ width: `${widthFor(item.entregas, maxCarrierVolume)}%` }} /><em>{item.entregas} entrega(s)</em></span>
+                    </div>
+                  </div>
+                ))}
+                {!data.volumetria_transportadoras.length && <div className="empty-state">Nenhuma transportadora com volume no período.</div>}
+              </div>
+              <ChartLegend items={[[t("dashboard.legend.routes"), "bar-routes"], [t("dashboard.legend.deliveries"), "bar-deliveries"]]} />
+            </section>
+          )}
         </div>
       )}
     </div>

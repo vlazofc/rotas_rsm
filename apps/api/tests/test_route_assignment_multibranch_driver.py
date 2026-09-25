@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Branch, Driver, DriverBranch, Route, Tenant, User, Vehicle
+from app.db.models import Branch, Driver, DriverBranch, Route, Tenant, User, Vehicle, VehicleBranch
 from app.db.session import Base
 from app.modules.branches.router import BranchIn, create_branch
 from app.modules.drivers.router import _sync_branches
@@ -34,6 +34,11 @@ def test_assignment_accepts_any_driver_from_route_tenant():
                 route_date=date.today(), status="planejada",
             )
             db.add(route); db.commit()
+            db.add_all([
+                DriverBranch(driver_id=driver.id, branch_id=secondary.id),
+                VehicleBranch(vehicle_id=vehicle.id, branch_id=secondary.id),
+            ])
+            db.commit()
 
             result = assign_route(
                 route.id,
@@ -48,7 +53,7 @@ def test_assignment_accepts_any_driver_from_route_tenant():
         engine.dispose()
 
 
-def test_driver_membership_covers_all_tenant_branches_and_new_branches():
+def test_driver_membership_is_explicit_and_new_branches_are_not_inherited():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     try:
@@ -67,12 +72,12 @@ def test_driver_membership_covers_all_tenant_branches_and_new_branches():
 
             _sync_branches(db, driver, [first.id], manager)
             db.flush()
-            assert set(db.scalars(select(DriverBranch.branch_id).where(DriverBranch.driver_id == driver.id))) == {first.id, second.id}
+            assert set(db.scalars(select(DriverBranch.branch_id).where(DriverBranch.driver_id == driver.id))) == {first.id}
 
             third = create_branch(BranchIn(name="Jundiaí"), db=db, actor=manager)
             assert db.scalar(select(DriverBranch).where(
                 DriverBranch.driver_id == driver.id,
                 DriverBranch.branch_id == third.id,
-            )) is not None
+            )) is None
     finally:
         engine.dispose()

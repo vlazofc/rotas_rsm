@@ -1,9 +1,10 @@
 """Dependências de autenticação — extrai e valida o usuário do JWT."""
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.core.security import decode_token
+from app.core.logging import logger
 from app.db.models import Branch, Tenant, User
 from app.db.session import get_db
 
@@ -37,26 +38,36 @@ def get_authenticated_user(
     )
     try:
         payload = decode_token(token)
-    except ValueError:
+    except ValueError as exc:
+        logger.info("Autenticação recusada: JWT inválido (%s)", type(exc.__cause__).__name__)
         raise cred_exc
     if payload.get("type") != "access":
+        logger.info("Autenticação recusada: tipo de token não é access")
         raise cred_exc
     user_id = payload.get("sub")
     if user_id is None:
+        logger.info("Autenticação recusada: token sem subject")
         raise cred_exc
     user = db.get(User, int(user_id))
-    if user is None or not user.active:
+    if user is None or not user.active or user.blocked:
+        logger.info("Autenticação recusada: usuário ausente ou inativo (id=%s)", user_id)
         raise cred_exc
     if payload.get("auth_version") != user.auth_version:
+        logger.info("Autenticação recusada: versão de sessão divergente (id=%s)", user_id)
         raise cred_exc
     return ensure_user_scope(user, db)
 
 
-def get_current_user(user: User = Depends(get_authenticated_user)) -> User:
+def get_current_user(request: Request, user: User = Depends(get_authenticated_user)) -> User:
     if user.must_change_password:
         raise HTTPException(status_code=403, detail={
             "code": "password_change_required",
             "message": "Defina uma nova senha antes de acessar o sistema.",
+        })
+    if (user.acting_branch_id is not None or user.acting_carrier_id is not None) and request.method not in {"GET", "HEAD", "OPTIONS"} and not request.url.path.endswith("/auth/acting-context"):
+        raise HTTPException(status_code=403, detail={
+            "code": "acting_context_read_only",
+            "message": "O modo Ver como é somente leitura. Saia desse contexto antes de alterar dados.",
         })
     return user
 

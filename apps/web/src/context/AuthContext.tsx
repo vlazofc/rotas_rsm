@@ -8,11 +8,18 @@ export interface CurrentUser {
   role: string;
   branch_id: number | null;
   tenant_id: number | null;
+  carrier_id?: number | null;
+  is_carrier_master?: boolean;
   department?: string | null;
   subgroup?: string | null;
   permissions?: string[];
   navigation_layout?: "sidebar" | "top";
   must_change_password: boolean;
+  acting_branch_id?: number | null;
+  acting_branch_name?: string | null;
+  acting_carrier_id?: number | null;
+  acting_carrier_name?: string | null;
+  acting_read_only?: boolean;
 }
 
 interface AuthState {

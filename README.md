@@ -36,14 +36,14 @@ trans-adimax-rotas/
 ## Subir em DESENVOLVIMENTO (local)
 
 ```bash
-cp .env.example .env          # ajuste AUTH_MODE=local e senhas
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# O override local usa .env.local.example e não depende do .env de produção.
+docker compose --env-file .env.local.example -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
 - Frontend dev (Vite): rode `cd apps/web && npm install && npm run dev` → http://localhost:5173
 - API: http://localhost:8000/docs
 - MinIO console: http://localhost:9001
-- Login inicial: `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` do `.env`
+- Login inicial local: `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` do `.env.local.example`
 - App do motorista: abra `apps/android-driver` no Android Studio.
 
 ## Subir em PRODUÇÃO (VPS Hostinger + Cloudflare Tunnel)
@@ -83,3 +83,4 @@ Detalhes em [docs/fluxo-operacional.md](docs/fluxo-operacional.md).
 - [Banco de dados](docs/banco-dados.md)
 - [Fluxo operacional](docs/fluxo-operacional.md)
 - [Segurança](docs/seguranca.md)
+- [Acessos, transportadoras e filiais](docs/arquitetura-acessos-filiais.md)

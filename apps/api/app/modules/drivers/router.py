@@ -7,9 +7,9 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_roles
+from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_permission, require_roles
 from app.core.config import settings
-from app.db.models import Attachment, Branch, Carrier, Driver, DriverBranch, DriverSettings, Route, User
+from app.db.models import Attachment, Branch, BranchApprovalPolicy, Carrier, CarrierBranch, CarrierUser, Driver, DriverBranch, DriverSettings, Route, User
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
@@ -18,7 +18,7 @@ from app.services import storage
 
 router = APIRouter(prefix="/drivers", tags=["drivers"])
 
-_MANAGER = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO)
+_MANAGER = require_permission("module.drivers", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO)
 
 
 class DriverIn(BaseModel):
@@ -122,15 +122,27 @@ def _out(db:Session,driver:Driver,config:DriverSettings)->DriverOut:
     return DriverOut.model_validate({**driver.__dict__,"branch_ids":branch_ids,"document_url":storage.get_presigned_url(driver.document_attachment.bucket,driver.document_attachment.storage_key) if driver.document_attachment else None,"cnh_url":storage.get_presigned_url(driver.cnh_attachment.bucket,driver.cnh_attachment.storage_key) if driver.cnh_attachment else None,"cnh_status":_deadline_status(driver.cnh_expiry_date,config.cnh_alert_days),"antt_status":_deadline_status(driver.antt_expiry_date,config.antt_alert_days,optional=not bool(driver.antt_number)),"registration_due_date":renewal,"registration_status":_deadline_status(renewal,config.registration_alert_days)})
 
 def _sync_branches(db:Session,driver:Driver,_branch_ids:list[int],_actor:User)->None:
-    # Todos os motoristas ficam disponíveis em todas as filiais da própria empresa.
-    # A filial principal permanece apenas para compatibilidade com dados históricos.
+    # A disponibilidade é explícita: estar na transportadora não libera o
+    # motorista automaticamente em todas as filiais atuais ou futuras.
     primary=db.get(Branch,driver.branch_id)
     if primary is None or primary.tenant_id!=driver.tenant_id:
         raise HTTPException(422,"Filial principal inválida para a empresa do motorista.")
-    ids=list(db.scalars(select(Branch.id).where(Branch.tenant_id==driver.tenant_id)).all())
-    if not ids:raise HTTPException(422,"A empresa do motorista não possui filiais cadastradas.")
+    ids=list(dict.fromkeys(_branch_ids or [driver.branch_id]))
+    if driver.branch_id not in ids:ids.insert(0,driver.branch_id)
+    branches=db.scalars(select(Branch).where(Branch.id.in_(ids))).all()
+    if len(branches)!=len(ids) or any(branch.tenant_id!=driver.tenant_id for branch in branches):
+        raise HTTPException(422,"Uma ou mais filiais não pertencem à empresa do motorista.")
+    if driver.carrier_id is not None:
+        enabled=set(db.scalars(select(CarrierBranch.branch_id).where(CarrierBranch.carrier_id==driver.carrier_id,CarrierBranch.active.is_(True))).all())
+        if any(branch_id not in enabled for branch_id in ids):
+            raise HTTPException(422,"A transportadora não está habilitada em uma das filiais selecionadas.")
     db.query(DriverBranch).filter(DriverBranch.driver_id==driver.id).delete(synchronize_session=False)
-    db.add_all([DriverBranch(driver_id=driver.id,branch_id=branch_id) for branch_id in ids])
+    policies={row.branch_id:row for row in db.scalars(select(BranchApprovalPolicy).where(BranchApprovalPolicy.branch_id.in_(ids))).all()}
+    db.add_all([DriverBranch(
+        driver_id=driver.id,
+        branch_id=branch_id,
+        approval_status="pending" if policies.get(branch_id) and policies[branch_id].require_driver_approval else "approved",
+    ) for branch_id in ids])
 
 def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | None, *, driver_id: int | None = None) -> None:
     if user_id is None:
@@ -147,7 +159,12 @@ def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | Non
 @router.get("", response_model=list[DriverOut], dependencies=[Depends(_MANAGER)])
 def list_drivers(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stmt = select(Driver).order_by(Driver.name)
-    if not has_all_environment_access(user) and user.tenant_id is not None:
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+    if membership is not None:
+        stmt = stmt.where(Driver.carrier_id == membership.carrier_id)
+    elif user.role == Role.ADMIN_GLOBAL.value and getattr(user, "acting_carrier_id", None) is not None:
+        stmt = stmt.where(Driver.carrier_id == user.acting_carrier_id)
+    elif not has_all_environment_access(user) and user.tenant_id is not None:
         stmt = stmt.where(Driver.tenant_id == user.tenant_id)
     config=_settings(db,user.tenant_id);rows=db.scalars(stmt).all();db.commit();return [_out(db,row,config) for row in rows]
 
@@ -155,7 +172,13 @@ def list_drivers(db: Session = Depends(get_db), user: User = Depends(get_current
 @router.get("/access-options", response_model=list[DriverAccessOut], dependencies=[Depends(_MANAGER)])
 def list_driver_access_options(db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     stmt = select(User).where(User.role == Role.MOTORISTA.value).order_by(User.name)
-    if not has_all_environment_access(actor):
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    if membership is not None:
+        stmt = stmt.join(CarrierUser, CarrierUser.user_id == User.id).where(
+            CarrierUser.carrier_id == membership.carrier_id,
+            CarrierUser.active.is_(True),
+        )
+    elif not has_all_environment_access(actor):
         stmt = stmt.where(User.tenant_id == actor.tenant_id)
     users = db.scalars(stmt).all()
     links = dict(db.execute(select(Driver.user_id, Driver.id).where(Driver.user_id.is_not(None))).all())
@@ -168,6 +191,11 @@ def list_driver_access_options(db: Session = Depends(get_db), actor: User = Depe
 @router.post("", response_model=DriverOut, dependencies=[Depends(_MANAGER)])
 def create_driver(data: DriverIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     branch = require_branch_access(db, actor, data.branch_id)
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    if membership is not None:
+        if db.scalar(select(CarrierBranch).where(CarrierBranch.carrier_id == membership.carrier_id, CarrierBranch.branch_id == branch.id, CarrierBranch.active.is_(True))) is None:
+            raise HTTPException(403, "Filial não habilitada para a transportadora.")
+        data = data.model_copy(update={"carrier_id": membership.carrier_id, "employment_type": "agregado"})
     if data.employment_type not in {"proprio", "agregado"}:
         raise HTTPException(422, "Vínculo do motorista inválido.")
     if data.carrier_id is not None:
@@ -215,8 +243,14 @@ def update_driver(driver_id: int, data: DriverUpdate,
     driver = db.get(Driver, driver_id)
     if driver is None:
         raise HTTPException(status_code=404, detail="Motorista não encontrado.")
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    if membership is not None and driver.carrier_id != membership.carrier_id:
+        raise HTTPException(404, "Motorista não encontrado.")
     require_branch_access(db, actor, driver.branch_id)
     updates = data.model_dump(exclude_unset=True,exclude={"branch_ids"})
+    if membership is not None:
+        updates["carrier_id"] = membership.carrier_id
+        updates["employment_type"] = "agregado"
     if "active" in updates:
         raise HTTPException(422, "Use a ação de situação para ativar ou desativar o motorista.")
     employment_type = updates.get("employment_type", driver.employment_type)
@@ -244,6 +278,8 @@ def update_driver(driver_id: int, data: DriverUpdate,
 def change_driver_status(driver_id:int,data:StatusChangeIn,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     driver=db.get(Driver,driver_id)
     if driver is None:raise HTTPException(404,"Motorista não encontrado.")
+    membership=db.scalar(select(CarrierUser).where(CarrierUser.user_id==actor.id,CarrierUser.active.is_(True)))
+    if membership is not None and driver.carrier_id!=membership.carrier_id:raise HTTPException(404,"Motorista não encontrado.")
     require_branch_access(db,actor,driver.branch_id);apply_status(db,obj=driver,data=data,user_id=actor.id,entity="driver");db.commit();db.refresh(driver)
     config=_settings(db,driver.tenant_id);db.commit();return _out(db,driver,config)
 
@@ -259,6 +295,8 @@ async def _store_driver_file(file:UploadFile,driver:Driver,kind:str)->Attachment
 async def upload_driver_documents(driver_id:int,document_photo:UploadFile|None=File(None),cnh_document:UploadFile|None=File(None),db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     driver=db.get(Driver,driver_id)
     if driver is None:raise HTTPException(404,"Motorista não encontrado.")
+    membership=db.scalar(select(CarrierUser).where(CarrierUser.user_id==actor.id,CarrierUser.active.is_(True)))
+    if membership is not None and driver.carrier_id!=membership.carrier_id:raise HTTPException(404,"Motorista não encontrado.")
     require_branch_access(db,actor,driver.branch_id)
     if document_photo and document_photo.filename:
         attachment=await _store_driver_file(document_photo,driver,"documento");db.add(attachment);db.flush();driver.document_attachment_id=attachment.id

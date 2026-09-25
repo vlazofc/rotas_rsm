@@ -19,7 +19,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import Role, scope_by_branch
-from app.db.models import Attachment, Driver, Expense, MaintenanceOrder, Notification, Route, RouteStop, User, Vehicle
+from app.db.models import Attachment, CarrierBranch, CarrierUser, Driver, Expense, MaintenanceOrder, Notification, Route, RouteStop, User, UserBranchAccess, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services import storage
@@ -28,6 +28,21 @@ from app.services.audit import log
 router = APIRouter(prefix="/gallery", tags=["gallery"])
 
 KINDS = {"entrega", "devolucao", "despesa", "despesa_odometro", "manutencao", "orcamento"}
+
+
+def _scope_route_carrier(stmt, user: User, db: Session):
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+    if membership is None:
+        return stmt
+    carrier_branches = select(CarrierBranch.branch_id).where(
+        CarrierBranch.carrier_id == membership.carrier_id, CarrierBranch.active.is_(True))
+    user_branches = select(UserBranchAccess.branch_id).where(UserBranchAccess.user_id == user.id)
+    allowed = set(db.scalars(carrier_branches).all()) & (set(db.scalars(user_branches).all()) | ({user.branch_id} if user.branch_id else set()))
+    return stmt.where(
+        Route.carrier_id == membership.carrier_id,
+        Route.carrier_assignment_status == "valid",
+        Route.branch_id.in_(allowed),
+    )
 
 
 class GalleryItemOut(BaseModel):
@@ -102,6 +117,7 @@ def _attachment_allowed(attachment_id: int, db: Session, user: User) -> bool:
     route_stmt = select(RouteStop.id).join(Route, Route.id == RouteStop.route_id).where(
         or_(RouteStop.proof_attachment_id == attachment_id, RouteStop.warehouse_return_attachment_id == attachment_id)
     ).limit(1)
+    route_stmt = _scope_route_carrier(route_stmt, user, db)
     expense_stmt = select(Expense.id).where(or_(Expense.attachment_id == attachment_id, Expense.odometer_attachment_id == attachment_id)).limit(1)
     maintenance_stmt = select(MaintenanceOrder.id).where(or_(MaintenanceOrder.attachment_id == attachment_id, MaintenanceOrder.budget_attachment_id == attachment_id)).limit(1)
     return bool(db.scalar(scoped(route_stmt, Route)) or db.scalar(scoped(expense_stmt, Expense)) or db.scalar(scoped(maintenance_stmt, MaintenanceOrder)))
@@ -150,6 +166,7 @@ def list_gallery(
             .outerjoin(Driver, Driver.id == Route.driver_id)
         )
         stmt = scope_by_branch(stmt, Route.branch_id, user, db)
+        stmt = _scope_route_carrier(stmt, user, db)
         if plate:
             stmt = stmt.where(Vehicle.plate.ilike(f"%{plate}%"))
         if driver_id:

@@ -18,3 +18,4 @@ echo "Backup criado: ${OUT}"
 # Retenção: mantém últimos 14 dias
 find /backups -name "admmendes_rotas_*.sql.gz" -mtime +14 -delete
 find /backups -name "jm_rotas_*.sql.gz" -mtime +14 -delete
+find /backups/minio -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf -- {} + 2>/dev/null || true

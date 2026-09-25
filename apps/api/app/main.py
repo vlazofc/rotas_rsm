@@ -1,18 +1,23 @@
 """Adimax — API operacional de rotas e entregas."""
 from contextlib import asynccontextmanager
+import time
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from redis import Redis
 
 from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.core.logging import configure_logging, logger
 from app.modules.auth.router import router as auth_router
+from app.modules.access_model.router import router as access_model_router
 from app.modules.branches.router import router as branches_router
 from app.modules.branding.router import router as branding_router
 from app.modules.carriers.router import router as carriers_router
@@ -33,13 +38,15 @@ from app.modules.users.router import router as users_router
 from app.modules.vehicles.router import router as vehicles_router
 from app.modules.vehicle_types.router import router as vehicle_types_router
 from app.services.bootstrap import init_db
-from app.db.session import engine
+from app.db.session import SessionLocal, engine
+from app.db.models import ClientActionReceipt
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("Iniciando %s (%s)", settings.app_name, settings.app_env)
-    init_db()
+    if settings.run_db_bootstrap:
+        init_db()
     yield
 
 
@@ -53,7 +60,55 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+_last_pool_warning = 0.0
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def database_pool_timeout_handler(_request: Request, exc: SQLAlchemyTimeoutError):
+    """Sinaliza saturação temporária sem expor internals nem devolver 500."""
+    global _last_pool_warning
+    now = time.monotonic()
+    # Uma rajada pode gerar centenas de timeouts; limitar o log evita que o
+    # próprio diagnóstico se torne outro gargalo de CPU e disco.
+    if now - _last_pool_warning >= 5:
+        _last_pool_warning = now
+        logger.warning("Pool de conexões saturado: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Sistema temporariamente ocupado. Tente novamente em instantes."},
+        headers={"Retry-After": "1"},
+    )
+
+
 app.add_middleware(SlowAPIMiddleware)
+
+
+@app.middleware("http")
+async def idempotent_offline_actions(request: Request, call_next):
+    """Não reaplica uma ação que o aparelho reenviou após perder a resposta."""
+    action_id = request.headers.get("X-Client-Action-ID")
+    if not action_id or request.method not in {"POST", "PUT", "PATCH"}:
+        return await call_next(request)
+    try:
+        normalized_id = str(UUID(action_id))
+    except ValueError:
+        return JSONResponse(status_code=422, content={"detail": "Identificador da ação offline inválido."})
+    with SessionLocal() as db:
+        receipt = db.get(ClientActionReceipt, normalized_id)
+        if receipt is not None:
+            return JSONResponse(status_code=208, content={"already_applied": True, "client_action_id": normalized_id})
+    response = await call_next(request)
+    if 200 <= response.status_code < 300:
+        try:
+            with SessionLocal() as db:
+                db.add(ClientActionReceipt(
+                    action_id=normalized_id, method=request.method, path=request.url.path,
+                    status_code=response.status_code,
+                ))
+                db.commit()
+        except Exception:
+            logger.exception("Não foi possível registrar idempotência da ação offline")
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -92,6 +147,6 @@ for r in (
     routes_router, dashboard_router, failure_reasons_router, reports_router,
     tenants_router, vehicle_types_router, branding_router, carriers_router,
     routes_import_router, gallery_router, erp_admin_router, notifications_router,
-    tracking_router, operational_settings_router, manual_routing_router,
+    tracking_router, operational_settings_router, manual_routing_router, access_model_router,
 ):
     app.include_router(r, prefix=prefix)

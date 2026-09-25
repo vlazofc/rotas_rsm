@@ -10,8 +10,8 @@ android {
         applicationId = "br.com.adimax.rotas.motorista"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.3.0"
+        versionCode = 14
+        versionName = "1.4.0"
         buildConfigField("String", "APP_URL", "\"${driverAppUrl.replace("\"", "\\\"")}\"")
         buildConfigField("String", "UPDATE_URL", "\"${driverAppUrl.replace("\"", "\\\"")}/downloads/adimax-motorista-version.json\"")
     }

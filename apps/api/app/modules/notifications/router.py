@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    AlertDismissal, AlertRule, Notification, Route, RouteOccurrence, User,
+    AlertDismissal, AlertRule, CarrierUser, Notification, Route, RouteOccurrence, User,
 )
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
@@ -47,6 +47,12 @@ def _tenant_rows(db: Session, model, user: User):
         stmt = stmt.where(model.tenant_id == user.tenant_id)
     if user.branch_id and hasattr(model, "branch_id") and user.role not in {"admin_global", "gestor_brasil", "diretoria", "auditor"}:
         stmt = stmt.where(model.branch_id == user.branch_id)
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+    if membership is not None:
+        if model is Route:
+            stmt = stmt.where(Route.carrier_id == membership.carrier_id)
+        elif model is RouteOccurrence:
+            stmt = stmt.where(RouteOccurrence.route_id.in_(select(Route.id).where(Route.carrier_id == membership.carrier_id)))
     return db.scalars(stmt).all()
 
 @router.get("/live")

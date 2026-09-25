@@ -1,12 +1,12 @@
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from app.core.permissions import Role, require_roles
+from app.core.permissions import Role, require_internal_permission
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.routing import calculate_manual_route, routing_enabled
 
-router = APIRouter(prefix="/manual-routing", tags=["manual-routing"], dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO, Role.TORRE_CONTROLE))])
+router = APIRouter(prefix="/manual-routing", tags=["manual-routing"], dependencies=[Depends(require_internal_permission("module.routing", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO, Role.TORRE_CONTROLE))])
 
 class ManualRouteIn(BaseModel):
     origin: str = Field(min_length=3, max_length=300)

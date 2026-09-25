@@ -16,11 +16,11 @@ th { background: #202a3c; color: white; text-align: left; }
 th, td { border: 1px solid #cfd5df; padding: 6px 7px; vertical-align: top; }
 tr:nth-child(even) td { background: #f7f8fa; }
 code { background: #eef1f5; border-radius: 3px; padding: 1px 4px; font-size: 9pt; }
-img { display: block; max-width: 72mm; max-height: 155mm; object-fit: contain; margin: 14px auto; border: 1px solid #d7dce4; border-radius: 12px; box-shadow: 0 5px 18px #0002; }
+img { display: block; max-width: 100%; max-height: 170mm; object-fit: contain; margin: 14px auto; border: 1px solid #d7dce4; border-radius: 12px; box-shadow: 0 5px 18px #0002; }
 strong { color: #111827; }
 @media print { a { color: inherit; text-decoration: none; } h2 { break-before: auto; } }</style></head><body><h1 id="manual-do-usuario-adimax-log">Manual do Usuário — Adimax Log</h1>
 <p><strong>Gestão de rotas, entregas, ocorrências e evidências</strong><br />
-Versão do manual: 1.0 — 15/09/2026</p>
+Versão do manual: 2.0 — 18/09/2026</p>
 <blockquote>
 <p>Este manual descreve a versão atual do sistema. A disponibilidade de telas e botões depende do perfil, da filial e dos serviços habilitados para a empresa.</p>
 </blockquote>
@@ -29,6 +29,7 @@ Versão do manual: 1.0 — 15/09/2026</p>
 <p><strong>criar ou importar a rota → atribuir motorista e veículo → calcular/validar o trajeto → registrar chegada ao CD → liberar a carga → sair do CD → atender as paradas → tratar devoluções → fechar a rota.</strong></p>
 <p>Cada ação operacional relevante gera data e hora e compõe o histórico auditável. O sistema também controla quem pode enxergar e alterar cada registro.</p>
 <h2 id="acesso-e-navegacao">2. Acesso e navegação</h2>
+<p><img src="assets/login.png" alt="Tela de acesso ao Adimax Log" /></p>
 <h3 id="entrar">2.1 Entrar</h3>
 <ol>
 <li>Abra o endereço fornecido pela empresa.</li>
@@ -95,7 +96,23 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </tbody>
 </table>
 <p>O nome do perfil define os módulos; o escopo define quais registros aparecem. A ausência de um botão normalmente indica falta de permissão, serviço desabilitado ou etapa operacional ainda não liberada.</p>
+<h3 id="filiais-transportadoras-e-acessos-compartilhados">3.1 Filiais, transportadoras e acessos compartilhados</h3>
+<ul>
+<li>A Adimax possui administração global e visão consolidada das filiais.</li>
+<li>Salto e Barueri são as filiais iniciais; o administrador global pode incluir novas unidades.</li>
+<li>A transportadora tem cadastro único por CNPJ e pode ser habilitada em uma ou várias filiais.</li>
+<li>Cada transportadora pode manter no máximo três masters ativos, independentemente do número de filiais.</li>
+<li>O primeiro master recebe o convite da Adimax e pode nomear até dois outros masters.</li>
+<li>Masters administram usuários, motoristas e veículos somente dentro da própria transportadora e das filiais liberadas.</li>
+<li>Motoristas e veículos têm cadastro único na transportadora e disponibilidade configurada por filial.</li>
+<li>Um colaborador Adimax recebe filiais específicas ou a política <strong>Todas as filiais, inclusive futuras</strong>.</li>
+</ul>
+<p>Quando uma transportadora já cadastrada começa a atender outra filial, crie somente o novo vínculo. Não duplique a empresa, seus masters, motoristas ou veículos.</p>
+<h3 id="aprovacao-opcional-por-filial">3.2 Aprovação opcional por filial</h3>
+<p>A exigência de aprovação pode ser ativada separadamente para motoristas e veículos em cada filial. Com a regra desligada, um cadastro completo, ativo e disponibilizado fica operacional automaticamente. Com a regra ligada, novos cadastros ou vínculos ficam pendentes até aprovação de um usuário Adimax autorizado.</p>
+<p>Os estados são independentes: <strong>ativo/inativo</strong> informa a situação cadastral; <strong>pendente/aprovado/reprovado</strong> informa a aprovação. Desligar a exigência não reativa um cadastro bloqueado. Ao ativar a regra, escolha entre aplicar somente aos novos vínculos ou revisar também os existentes, sem interromper viagens em andamento.</p>
 <h2 id="painel">4. Painel</h2>
+<p><img src="assets/dashboard.png" alt="Painel operacional e indicadores" /></p>
 <p>O <strong>Painel</strong> resume a operação. Escolha o período, a referência de semana quando exibida e a situação <strong>Abertas</strong>, <strong>Fechadas</strong> ou <strong>Todas</strong>.</p>
 <p>Principais indicadores:</p>
 <ul>
@@ -179,6 +196,7 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </table>
 <p>As médias ignoram registros sem os dois horários necessários e resultados negativos. Tempos são exibidos em minutos e arredondados para uma casa decimal.</p>
 <h2 id="rotas">5. Rotas</h2>
+<p><img src="assets/routes.png" alt="Tela de rotas, mapa e fluxo de entregas" /></p>
 <p>Esta é a tela central da operação. Ela possui as visões <strong>Mapa</strong> e <strong>Gestão</strong>, busca e filtros de rotas abertas, pendências anteriores, fechadas ou todas.</p>
 <h3 id="situacoes">5.1 Situações</h3>
 <table>
@@ -261,12 +279,22 @@ Versão do manual: 1.0 — 15/09/2026</p>
 <li>Escolha o arquivo e confirme a importação.</li>
 <li>Confira o resumo de criadas, atualizadas, ignoradas e linhas com erro.</li>
 </ol>
+<p>Cada linha deve identificar a transportadora por <strong>ID único</strong> e <strong>nome</strong>. O ID controla a identidade sem depender de grafia; o nome fica disponível para conferência e distribuição da rota aos responsáveis. O sistema valida se:</p>
+<ol>
+<li>a filial da rota existe;</li>
+<li>a transportadora existe;</li>
+<li>ID e nome representam a mesma transportadora;</li>
+<li>a transportadora está habilitada para a filial.</li>
+</ol>
+<p>Se a identificação estiver ausente, divergente ou sem vínculo com a filial, a linha permanece pendente para correção pela Adimax e não aparece para a transportadora.</p>
+<p><img src="assets/route-import.png" alt="Janela de importação de rotas" /></p>
 <p>Importações futuras atualizam dados autorizados, mas preservam ações operacionais já realizadas. Rotas também podem vir de integração autorizada.</p>
 <h3 id="mapa-e-fluxo-de-entregas">5.4 Mapa e fluxo de entregas</h3>
 <p>Ao selecionar uma rota, o mapa mostra origem, paradas e linha calculada. O painel <strong>Fluxo de entregas</strong> mostra a sequência e a situação. Cores e marcadores distinguem o andamento; um endereço inválido pode deixar a parada sem ponto no mapa.</p>
 <h3 id="gestao-e-atribuicoes">5.5 Gestão e atribuições</h3>
 <p>Na visão <strong>Gestão</strong>, localize a rota e atribua motorista e veículo. O campo tem busca textual e só aceita uma opção válida da lista. O sistema valida filial, situação do cadastro e conflitos operacionais.</p>
 <h3 id="detalhe-da-rota">5.6 Detalhe da rota</h3>
+<p><img src="assets/route-detail.png" alt="Detalhamento e operação de uma rota" /></p>
 <p>A tela <strong>Abrir rota</strong> reúne:</p>
 <ul>
 <li>dados gerais, origem, motorista, veículo solicitado/enviado, ajudante e indicação de rastreamento;</li>
@@ -294,7 +322,19 @@ Versão do manual: 1.0 — 15/09/2026</p>
 <h4 id="fechar-e-reabrir">Fechar e reabrir</h4>
 <p><strong>Fechar rota</strong> só fica válido quando as paradas estiverem resolvidas. Se houver devolução, também é necessário anexar o comprovante de entrega no CD. O fechamento pode solicitar os comprovantes pendentes em lote. <strong>Reabrir rota</strong> é reservado a quem possui permissão de correção.</p>
 <p>Administradores podem corrigir situação, limpar marcações, anexos ou eventos. Toda correção exige justificativa e fica registrada em auditoria.</p>
+<h3 id="visibilidade-e-troca-de-transportadora">5.7 Visibilidade e troca de transportadora</h3>
+<p>Toda rota possui uma filial responsável e uma transportadora executora. O administrador global vê todas; colaboradores Adimax veem as filiais autorizadas; usuários de transportadora veem somente as rotas da própria empresa nas filiais permitidas; motoristas veem somente as rotas atribuídas a eles.</p>
+<p>Somente o <strong>Administrador global Adimax</strong> pode trocar a transportadora:</p>
+<ol>
+<li>abra o detalhe da rota;</li>
+<li>selecione <strong>Alterar transportadora</strong>;</li>
+<li>escolha uma transportadora habilitada na filial;</li>
+<li>informe o motivo obrigatório;</li>
+<li>revise o aviso de impacto e confirme.</li>
+</ol>
+<p>A transportadora anterior perde o acesso e a nova passa a enxergar os dados operacionais necessários. Motorista e veículo são desvinculados para nova atribuição. A alteração e o log são gravados juntos, registrando rota, filial, antes/depois, responsável, data/hora, motivo, atribuições anteriores e situação. O histórico operacional não é apagado nem transferido de autoria.</p>
 <h2 id="monitoramento-de-rotas">6. Monitoramento de rotas</h2>
+<p><img src="assets/routing.png" alt="Central de monitoramento de rotas" /></p>
 <p>Use esta tela para preparar e supervisionar cargas:</p>
 <ol>
 <li>filtre por código, origem e intervalo de datas;</li>
@@ -324,6 +364,7 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </ul>
 <p>Endereços idênticos consecutivos são agrupados para evitar trecho de distância zero. Se algum endereço não puder ser localizado, a estimativa completa é retirada até a correção.</p>
 <h2 id="roteirizacao-manual">7. Roteirização manual</h2>
+<p><img src="assets/manual-routing.png" alt="Simulação de roteirização manual" /></p>
 <p>Serve para simular um trajeto sem criar uma rota operacional.</p>
 <ol>
 <li>Informe o <strong>Ponto de partida</strong>.</li>
@@ -334,6 +375,7 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </ol>
 <p>O resultado apresenta ordem calculada, distância, duração e mapa conforme resposta do serviço de roteirização.</p>
 <h2 id="ocorrencias">8. Ocorrências</h2>
+<p><img src="assets/occurrences.png" alt="Gestão de ocorrências" /></p>
 <p>A tela controla problemas e tarefas operacionais com histórico completo.</p>
 <h3 id="registrar">8.1 Registrar</h3>
 <ol>
@@ -348,14 +390,17 @@ Versão do manual: 1.0 — 15/09/2026</p>
 <p>Gestores podem <strong>Assumir</strong>, mover entre aberta, em tratamento, resolvida, finalizada ou cancelada e registrar solução/notas. Resolver ou finalizar exige descrição do que foi feito. O histórico mostra data/hora, etapa, responsável e observação.</p>
 <p><strong>Gerenciar categorias</strong> permite criar, renomear, inativar e reativar opções sem apagar o histórico.</p>
 <h2 id="galeria">9. Galeria</h2>
+<p><img src="assets/gallery.png" alt="Galeria de comprovantes e documentos" /></p>
 <p>Centraliza comprovantes de entrega/devolução e outros anexos disponíveis na versão contratada.</p>
 <p>Filtre por placa, motorista, tipo e intervalo de datas. <strong>Abrir documento</strong> baixa ou exibe o arquivo protegido. Administrador global pode excluir comprovante de entrega ou solicitar uma nova evidência ao motorista.</p>
 <h2 id="acompanhamento-gps">10. Acompanhamento GPS</h2>
+<p><img src="assets/tracking.png" alt="Mapa de acompanhamento GPS" /></p>
 <h3 id="torregestao">Torre/gestão</h3>
 <p>O mapa mostra veículos monitorados, rota, motorista, placa, última velocidade e horário da posição. Use <strong>Tela cheia</strong> para a central de monitoramento. Dados antigos ou ausência de posição podem indicar aparelho sem sinal, permissão negada ou rota fora do estado ativo.</p>
 <h3 id="motorista">Motorista</h3>
 <p>O GPS inicia automaticamente quando existe rota em andamento/rota do dia elegível e termina após o fechamento. A posição é enviada em torno de cada 120 segundos, com latitude, longitude, precisão, velocidade e data/hora. O Android mantém uma notificação “Rastreamento ativo durante sua rota” enquanto o serviço está em segundo plano.</p>
 <h2 id="motoristas">11. Motoristas</h2>
+<p><img src="assets/drivers.png" alt="Cadastro e gestão de motoristas" /></p>
 <p>A tela mostra totais, cadastros com alertas e documentos próximos do vencimento.</p>
 <p>Funções:</p>
 <ul>
@@ -370,6 +415,7 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </ul>
 <p><strong>Desativar</strong> retira o cadastro de novas operações; <strong>Bloquear</strong> representa impedimento explícito e exige motivo. Prefira essas ações a excluir registros com histórico.</p>
 <h2 id="veiculos">12. Veículos</h2>
+<p><img src="assets/vehicles.png" alt="Cadastro e gestão de veículos" /></p>
 <p>A tela possui três áreas:</p>
 <ul>
 <li><strong>Veículos:</strong> placa, tipo, propriedade, documentos, situação e demais dados operacionais;</li>
@@ -378,6 +424,7 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </ul>
 <p>Ao cadastrar, informe placa, tipo, filial, frota própria ou agregado, proprietário e quem recebe o frete. Para terceiro, selecione a transportadora. Anexe o CRLV quando solicitado. Situações e motivos seguem a mesma lógica de ativar/desativar/bloquear.</p>
 <h2 id="relatorios">13. Relatórios</h2>
+<p><img src="assets/reports.png" alt="Relatórios e auditoria" /></p>
 <p>Defina <strong>Início</strong> e <strong>Fim</strong>, selecione <strong>Consultar</strong> e navegue pelas abas:</p>
 <ul>
 <li><strong>Visão geral:</strong> indicadores resumidos e situação das rotas;</li>
@@ -393,6 +440,7 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </ul>
 <p>No resumo gerencial, a taxa de conclusão é <code>rotas finalizadas ÷ total de rotas × 100</code>. Valores vazios produzem zero, evitando divisão inválida.</p>
 <h2 id="usuarios">14. Usuários</h2>
+<p><img src="assets/users.png" alt="Gestão de usuários internos e acessos de motoristas" /></p>
 <p>A tela separa <strong>Equipe interna</strong> e <strong>Acessos de motoristas</strong>.</p>
 <p>Para criar acesso:</p>
 <ol>
@@ -404,9 +452,22 @@ Versão do manual: 1.0 — 15/09/2026</p>
 </ol>
 <p>Também é possível editar, ativar, desativar, bloquear/desbloquear e <strong>Redefinir senha</strong>. O usuário não pode bloquear a si próprio. O controle global do roteirizador pode ser ligado/desligado por administrador autorizado.</p>
 <h2 id="perfis-de-acesso">15. Perfis de acesso</h2>
+<p><img src="assets/profiles.png" alt="Configuração de perfis e permissões" /></p>
 <p>Disponível ao administrador global. <strong>Novo perfil</strong> cria código, nome, descrição e conjunto de módulos. <strong>Gerenciar</strong> altera permissões e situação. Um perfil inativo deixa de estar disponível para novas concessões, sem apagar o histórico.</p>
 <p>Módulos atuais: Painel, Rotas, Monitoramento, Roteirização, Ocorrências, Galeria, Acompanhamento, Motoristas, Veículos, Relatórios e Usuários. Escopos de empresa/filial/atribuição continuam aplicados mesmo quando o módulo está liberado.</p>
-<h2 id="boas-praticas-e-solucao-rapida">16. Boas práticas e solução rápida</h2>
+<h2 id="operacao-sem-internet-no-aplicativo">16. Operação sem internet no aplicativo</h2>
+<p>O aplicativo do motorista mantém o trabalho operacional quando o aparelho perde a conexão. As ações elegíveis são salvas em uma fila persistente no próprio aparelho, inclusive fotos e comprovantes.</p>
+<h3 id="como-funciona">Como funciona</h3>
+<ol>
+<li>o motorista continua registrando chegada, liberação, check-in, entrega, recusa, devolução e posições de rastreamento;</li>
+<li>a tela avança imediatamente e mostra o aviso <strong>Trabalhando sem internet</strong>;</li>
+<li>o contador informa quantas ações aguardam envio;</li>
+<li>ao recuperar a rede, o aplicativo envia tudo automaticamente, na ordem original;</li>
+<li>ao terminar, a rota é recarregada com o estado confirmado pelo servidor.</li>
+</ol>
+<p>Cada ação possui um identificador único. Se a rede cair depois de o servidor processar uma ação, a repetição é reconhecida e não gera dois check-ins ou duas entregas. A fila permanece mesmo se o aplicativo for fechado ou o aparelho reiniciado.</p>
+<p>Não saia da conta, não limpe os dados do aplicativo e não desinstale o app enquanto houver ações pendentes. Se alguma sincronização falhar por regra de negócio, toque no aviso para tentar novamente após corrigir a condição ou procure a operação.</p>
+<h2 id="boas-praticas-e-solucao-rapida">17. Boas práticas e solução rápida</h2>
 <ul>
 <li>Confira motorista, veículo, origem e sequência antes de liberar a carga.</li>
 <li>Registre eventos no momento em que acontecem; os indicadores usam esses horários.</li>

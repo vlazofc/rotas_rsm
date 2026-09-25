@@ -1,4 +1,5 @@
 import axios from "axios";
+import { configureOfflineQueue, isOfflineEligible, queueOfflineRequest } from "./offlineQueue";
 
 // Por padrão a API fica no mesmo domínio (/api). Se VITE_API_URL estiver
 // definida (build de produção com subdomínio dedicado), usa essa URL completa.
@@ -52,6 +53,9 @@ let refreshPromise: Promise<string> | null = null;
 api.interceptors.response.use(
   (r) => r,
   async (error) => {
+    const offlineConfig = error.config;
+    const networkFailure = !error.response && (!navigator.onLine || ["ERR_NETWORK", "ECONNABORTED", "ETIMEDOUT"].includes(error.code));
+    if (networkFailure && isOfflineEligible(offlineConfig)) return queueOfflineRequest(offlineConfig);
     if (error.response?.status === 403 && error.response?.data?.detail?.code === "password_change_required") {
       if (location.pathname !== "/change-password") location.href = "/change-password";
     }
@@ -96,6 +100,8 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+configureOfflineQueue((config) => api.request(config));
 
 export async function login(email: string, password: string) {
   // /auth/login aceita e-mail ou nome de usuário no campo OAuth2 username.

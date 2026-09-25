@@ -6,7 +6,7 @@ from sqlalchemy import false, select, true
 from sqlalchemy.orm import Session
 
 from app.modules.auth.deps import get_current_user
-from app.db.models import Branch, RoleProfile, Tenant, User
+from app.db.models import Branch, CarrierUser, RoleProfile, Tenant, User, UserAccessPolicy, UserBranchAccess
 from app.db.session import get_db
 
 
@@ -28,11 +28,15 @@ class Role(str, Enum):
 
 
 ROLE_CONFIG = {
+    Role.GESTOR_BRASIL: {"order": 15, "label": "Gestor Brasil", "description": "Gestão operacional ampla no escopo autorizado", "permissions": ["module.dashboard", "module.routes", "module.monitoring", "module.occurrences", "module.gallery", "module.tracking", "module.drivers", "module.vehicles", "module.carriers", "module.branches", "module.reports", "module.users"]},
     Role.ADMIN_SITE: {"order": 20, "label": "Admin Site", "description": "Administra usuários e cadastros da operação", "permissions": ["module.dashboard", "module.routes", "module.monitoring", "module.occurrences", "module.gallery", "module.tracking", "module.drivers", "module.vehicles", "module.reports", "module.users"]},
     Role.GERENTE: {"order": 30, "label": "Gerente", "description": "Visão gerencial da operação e da filial", "permissions": ["module.dashboard", "module.routes", "module.monitoring", "module.occurrences", "module.gallery", "module.tracking", "module.drivers", "module.vehicles", "module.reports", "module.users"]},
     Role.LIDER: {"order": 40, "label": "Líder", "description": "Coordena a execução operacional da filial", "permissions": ["module.dashboard", "module.routes", "module.monitoring", "module.occurrences", "module.gallery", "module.tracking"]},
     Role.PLANEJAMENTO: {"order": 50, "label": "Planejamento", "description": "Planeja rotas, motoristas e veículos", "permissions": ["module.dashboard", "module.routes", "module.routing", "module.monitoring", "module.drivers", "module.vehicles"]},
     Role.MONITORAMENTO: {"order": 60, "label": "Monitoramento", "description": "Monitora viagens, ocorrências e evidências", "permissions": ["module.dashboard", "module.routes", "module.monitoring", "module.occurrences", "module.gallery", "module.tracking"]},
+    Role.TORRE_CONTROLE: {"order": 65, "label": "Torre de controle", "description": "Monitora rotas, ocorrências e posições", "permissions": ["module.dashboard", "module.routes", "module.monitoring", "module.occurrences", "module.gallery", "module.tracking"]},
+    Role.GESTOR_FINANCEIRO: {"order": 70, "label": "Gestor financeiro", "description": "Concilia pagamentos e consulta contexto financeiro das rotas", "permissions": ["module.reports", "finance.view", "finance.accounts.manage"]},
+    Role.CLIENTE: {"order": 80, "label": "Cliente", "description": "Consulta rotas e acompanhamento autorizados", "permissions": ["module.routes", "module.tracking"]},
     Role.ADMIN_GLOBAL: {
         "order": 10,
         "label": "Administrador global",
@@ -108,13 +112,42 @@ class AccessScope(str, Enum):
 
 def has_all_environment_access(user: User, db: Session | None = None) -> bool:
     """Acesso entre empresas exige perfil global ou capacidade explícita."""
+    if user.role == Role.ADMIN_GLOBAL.value and (getattr(user, "acting_branch_id", None) is not None or getattr(user, "acting_carrier_id", None) is not None):
+        return False
     return user.role == Role.ADMIN_GLOBAL.value or SCOPE_GLOBAL in user_permissions(user, db)
+
+
+def has_all_branches_policy(user: User, db: Session | None) -> bool:
+    """Capacidade explícita 'todas as filiais, inclusive futuras' (colaboradores Adimax)."""
+    if db is None or not hasattr(db, "scalar") or getattr(user, "id", None) is None:
+        return False
+    policy = db.scalar(select(UserAccessPolicy).where(UserAccessPolicy.user_id == user.id))
+    return bool(policy and policy.all_branches_including_future)
+
+
+def user_branch_ids(user: User, db: Session | None) -> set[int]:
+    """Filiais explicitamente liberadas para o usuário (principal + UserBranchAccess)."""
+    acting_branch_id = getattr(user, "acting_branch_id", None)
+    if user.role == Role.ADMIN_GLOBAL.value and acting_branch_id is not None:
+        return {acting_branch_id}
+    ids: set[int] = set()
+    if user.branch_id is not None:
+        ids.add(user.branch_id)
+    if db is not None and hasattr(db, "scalars") and getattr(user, "id", None) is not None:
+        ids.update(db.scalars(select(UserBranchAccess.branch_id).where(UserBranchAccess.user_id == user.id)).all())
+    return ids
 
 
 def operational_scope(user: User, db: Session | None = None) -> AccessScope:
     """Resolve a fronteira de dados independentemente dos módulos habilitados."""
     if has_all_environment_access(user, db):
         return AccessScope.GLOBAL
+    if user.role == Role.ADMIN_GLOBAL.value and getattr(user, "acting_branch_id", None) is not None:
+        return AccessScope.BRANCH
+    if user.role == Role.ADMIN_GLOBAL.value and getattr(user, "acting_carrier_id", None) is not None:
+        return AccessScope.TENANT
+    if has_all_branches_policy(user, db):
+        return AccessScope.TENANT
     permissions = user_permissions(user, db)
     effective_role = ROLE_EQUIVALENTS.get(user.role, user.role)
     if SCOPE_TENANT in permissions or effective_role in {
@@ -140,8 +173,11 @@ def branch_scope_filter(branch_column, user: User, db: Session):
             return false()
         branch_ids = select(Branch.id).where(Branch.tenant_id == user.tenant_id)
         return branch_column.in_(branch_ids)
-    if scope == AccessScope.BRANCH and user.branch_id is not None:
-        return branch_column == user.branch_id
+    if scope == AccessScope.BRANCH:
+        ids = user_branch_ids(user, db)
+        if not ids:
+            return false()
+        return branch_column.in_(ids)
     return false()
 
 
@@ -159,15 +195,15 @@ def user_permissions(user: User, db: Session | None = None) -> set[str]:
     return permissions
 
 
-def has_permission(user: User, permission: str, *fallback_roles: Role) -> bool:
+def has_permission(user: User, permission: str, *fallback_roles: Role, db: Session | None = None) -> bool:
     if user.role == Role.ADMIN_GLOBAL.value:
         return True
-    return permission in user_permissions(user) or user.role in {role.value for role in fallback_roles}
+    return permission in user_permissions(user, db) or user.role in {role.value for role in fallback_roles}
 
 
 def require_permission(permission: str, *fallback_roles: Role):
-    def _checker(user: User = Depends(get_current_user)) -> User:
-        if not has_permission(user, permission, *fallback_roles):
+    def _checker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+        if not has_permission(user, permission, *fallback_roles, db=db):
             raise HTTPException(status_code=403, detail="Acesso não liberado pelo gestor para este módulo.")
         return user
     return _checker
@@ -190,15 +226,40 @@ def require_roles(*roles: Role):
     return _checker
 
 
-def require_same_branch(user: User, branch_id: int) -> None:
+def require_internal_roles(*roles: Role):
+    """Perfis reservados a colaboradores internos, nunca a contas de transportadora."""
+    allowed = {r.value for r in roles}
+    def _checker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+        carrier_user = db.scalar(select(CarrierUser.id).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+        if carrier_user is not None:
+            raise HTTPException(status_code=403, detail="Função exclusiva para colaboradores Adimax.")
+        if user.role != Role.ADMIN_GLOBAL.value and user.role not in allowed:
+            raise HTTPException(status_code=403, detail="Perfil sem permissão para esta ação.")
+        return user
+    return _checker
+
+
+def require_internal_permission(permission: str, *fallback_roles: Role):
+    """Capacidade configurável, limitada a colaboradores sem vínculo de transportadora."""
+    def _checker(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+        carrier_user = db.scalar(select(CarrierUser.id).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+        if carrier_user is not None:
+            raise HTTPException(status_code=403, detail="Função exclusiva para colaboradores Adimax.")
+        if not has_permission(user, permission, *fallback_roles, db=db):
+            raise HTTPException(status_code=403, detail="Acesso não liberado pelo gestor para este módulo.")
+        return user
+    return _checker
+
+
+def require_same_branch(user: User, branch_id: int, db: Session | None = None) -> None:
     """Impede acesso cruzado entre filiais e empresas."""
-    if has_all_environment_access(user):
+    if has_all_environment_access(user, db) or has_all_branches_policy(user, db):
         return
     # O motorista pode trabalhar em várias filiais. O acesso efetivo continua
     # limitado à rota atribuída pelos guards específicos de rotas/tracking.
     if user.role == Role.MOTORISTA.value:
         return
-    if user.branch_id is None or branch_id != user.branch_id:
+    if branch_id not in user_branch_ids(user, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acesso restrito à própria filial.",
@@ -222,7 +283,7 @@ def require_branch_access(db: Session, user: User, branch_id: int) -> Branch:
         raise HTTPException(status_code=409, detail="Unidade operacional inativa.")
     require_same_tenant(user, branch.tenant_id)
     scope = operational_scope(user, db)
-    if scope == AccessScope.BRANCH and (user.branch_id is None or branch.id != user.branch_id):
+    if scope == AccessScope.BRANCH and branch.id not in user_branch_ids(user, db):
         raise HTTPException(status_code=403, detail="Acesso restrito à própria filial.")
     if scope == AccessScope.ASSIGNED and user.role != Role.MOTORISTA.value:
         raise HTTPException(status_code=403, detail="Acesso restrito aos registros atribuídos ao usuário.")

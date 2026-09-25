@@ -7,6 +7,7 @@ import api, { exitPreviewSession, isPreviewMode } from "../services/api";
 import LanguageSwitcher from "./LanguageSwitcher";
 import ThemeToggle from "./ThemeToggle";
 import { usePolling } from "../hooks/usePolling";
+import { OfflineQueueState, subscribeOfflineQueue, syncOfflineQueue } from "../services/offlineQueue";
 
 interface NavItem {
   to: string;
@@ -20,6 +21,7 @@ interface NavItem {
 }
 interface AppNotification { id: number; title: string; body?: string; read: boolean; created_at: string }
 interface LiveAlert { id:string;event_type:string;severity:"critical"|"warning"|"info";category:string;title:string;body:string;href:string;due_date?:string|null }
+interface ActingOption { id:number; name:string }
 
 function IconSvg({ children }: { children: ReactNode }) {
   return (
@@ -165,6 +167,25 @@ export default function Layout({ children }: { children: ReactNode }) {
   const [savingAppConsent, setSavingAppConsent] = useState(false);
   const driverTrackingRoute = useRef<number | null>(null);
   const driverBrowserWatch = useRef<number | null>(null);
+  const [offlineQueue, setOfflineQueue] = useState<OfflineQueueState>({ online: navigator.onLine, pending: 0, syncing: false, failed: 0 });
+  const [actingBranches,setActingBranches]=useState<ActingOption[]>([]);
+  const [actingCarriers,setActingCarriers]=useState<ActingOption[]>([]);
+  const [adminCount,setAdminCount]=useState<number|null>(null);
+
+  useEffect(() => { const unsubscribe = subscribeOfflineQueue(setOfflineQueue); return unsubscribe; }, []);
+
+  useEffect(()=>{
+    if(user?.role!=="admin_global")return;
+    Promise.all([api.get("/branches"),api.get("/carriers"),api.get("/auth/admin-security-status")]).then(([branches,carriers,security])=>{
+      setActingBranches(branches.data);setActingCarriers(carriers.data);setAdminCount(security.data.active_admin_count);
+    }).catch(()=>{});
+  },[user?.role]);
+
+  async function setActingContext(branchId:number|null,carrierId:number|null){
+    await api.put("/auth/acting-context",{branch_id:branchId,carrier_id:carrierId});
+    await refresh();
+    window.location.assign("/");
+  }
 
   useEffect(() => {
     api.get("/tenants/me")
@@ -200,6 +221,8 @@ export default function Layout({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (user?.role !== "motorista" || !appConsentReady) return;
     let disposed = false;
+    let routeTimer: number | undefined;
+    let refreshingRoute = false;
     const stop = (revoke: boolean) => {
       window.AndroidLocation?.stopLocationUpdates?.();
       if (driverBrowserWatch.current !== null) navigator.geolocation.clearWatch(driverBrowserWatch.current);
@@ -221,15 +244,28 @@ export default function Layout({ children }: { children: ReactNode }) {
       driverBrowserWatch.current = navigator.geolocation.watchPosition(p => send(p.coords.latitude,p.coords.longitude,p.coords.accuracy,p.coords.speed??undefined),() => {},{enableHighAccuracy:true,maximumAge:15000});
     };
     const refresh = async () => {
-      const {data} = await api.get<Array<{id:number;status:string;route_date?:string}>>("/routes");
-      const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
-      const active = data.find(route => route.status === "em_rota")
-        ?? data.find(route => route.route_date === today && !["finalizada", "cancelada"].includes(route.status));
-      if (active) await start(active.id); else stop(true);
+      if (disposed || refreshingRoute || document.hidden) return;
+      refreshingRoute = true;
+      try {
+        const {data} = await api.get<Array<{id:number;status:string;route_date?:string}>>("/routes");
+        const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+        const active = data.find(route => route.status === "em_rota")
+          ?? data.find(route => route.route_date === today && !["finalizada", "cancelada"].includes(route.status));
+        if (active) await start(active.id); else stop(true);
+      } finally {
+        refreshingRoute = false;
+        if (!disposed) routeTimer = window.setTimeout(() => void refresh(), 27000 + Math.random() * 6000);
+      }
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 30000);
-    return () => { disposed = true; window.clearInterval(timer); stop(false); };
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      disposed = true;
+      if (routeTimer) window.clearTimeout(routeTimer);
+      document.removeEventListener("visibilitychange", onVisible);
+      stop(false);
+    };
   }, [user?.id, user?.role, appConsentReady]);
   useEffect(() => {
     setOpenTopGroup(null);
@@ -352,19 +388,22 @@ export default function Layout({ children }: { children: ReactNode }) {
     { to: "/routing/manual", label: "Roteirização manual", permission:"module.routing", fallbackRoles: ["gestor_brasil","operador_logistico","torre_controle"], group: t("nav.group_operation"), feature: "feature_route_optimization" },
     { to: "/occurrences", label: "Ocorrências", permission:"module.occurrences", fallbackRoles:["gestor_brasil","operador_logistico","torre_controle","motorista"], group: t("nav.group_operation") },
     { to: "/gallery", label: "Galeria", permission:"module.gallery", fallbackRoles: ["gestor_brasil","auditor","operador_logistico","torre_controle"], group: t("nav.group_operation") },
-    { to: "/tracking", label: "Acompanhamento", permission:"module.tracking", fallbackRoles:["gestor_brasil","operador_logistico","torre_controle","motorista","cliente"], group: t("nav.group_operation"), feature: "feature_rastreamento" },
+    { to: "/tracking", label: "Monitoramento GPS", permission:"module.tracking", fallbackRoles:["gestor_brasil","operador_logistico","torre_controle","motorista","cliente"], group: t("nav.group_operation"), feature: "feature_rastreamento" },
 
     // --- Cadastros ---
     { to: "/config/drivers", label: t("config.tabs.drivers"), permission:"module.drivers", fallbackRoles: ["gestor_brasil", "operador_logistico"], group: t("nav.group_registers") },
     { to: "/config/vehicles", label: t("config.tabs.vehicles"), permission:"module.vehicles", fallbackRoles: ["gestor_brasil", "operador_logistico"], group: t("nav.group_registers") },
+    { to: "/carriers", label: "Transportadoras", permission:"module.carriers", fallbackRoles: ["gestor_brasil"], group: t("nav.group_registers") },
+    { to: "/config/branches", label: "Filiais Adimax", permission:"module.branches", fallbackRoles: ["gestor_brasil"], group: t("nav.group_registers") },
 
     // --- Administração ---
-    { to: "/reports", label: t("nav.reports", { defaultValue: "Relatórios" }), permission:"module.reports", fallbackRoles:["gestor_brasil","auditor"], group: t("nav.group_admin") },
+    { to: "/reports", label: t("nav.reports", { defaultValue: "Relatórios" }), permission:"module.reports", fallbackRoles:["gestor_brasil","gestor_financeiro","auditor","diretoria"], group: t("nav.group_admin") },
     { to: "/users", label: t("nav.users"), permission:"module.users", fallbackRoles:["gestor_brasil"], group: t("nav.group_admin") },
     { to: "/profiles", label: "Perfis de acesso", roles: ["admin_global"], group: t("nav.group_admin") },
   ];
 
   const items = allItems.filter((i) =>
+    (!user?.is_carrier_master || ["/", "/routes", "/occurrences", "/gallery", "/tracking", "/config/drivers", "/config/vehicles", "/users"].includes(i.to)) &&
     (!i.roles || hasRole(...i.roles)) &&
     (!i.permission || hasPermission(i.permission, ...(i.fallbackRoles || []))) &&
     (!i.feature || features[i.feature])
@@ -378,7 +417,20 @@ export default function Layout({ children }: { children: ReactNode }) {
   const groups = desiredGroupOrder.filter((group) => items.some((i) => i.group === group));
 
   return (
-    <div className={`app-shell navigation-${navigationLayout}${collapsed ? " is-collapsed" : ""}${branding.topbar_extends_sidebar ? " strip-extended" : ""}`} style={{"--nav-bg":branding.sidebar_background_color||"var(--panel)","--nav-text":branding.sidebar_text_color||"#334155","--nav-active":branding.sidebar_active_color||branding.primary_color||"var(--brand)"} as React.CSSProperties}>
+    <div className={`app-shell navigation-${navigationLayout}${collapsed ? " is-collapsed" : ""}${branding.topbar_extends_sidebar ? " strip-extended" : ""}${user?.role==="admin_global"?" has-admin-context-bar":""}`} style={{"--nav-bg":branding.sidebar_background_color||"var(--panel)","--nav-text":branding.sidebar_text_color||"#334155","--nav-active":branding.sidebar_active_color||branding.primary_color||"var(--brand)"} as React.CSSProperties}>
+      {user?.role==="admin_global"&&<div style={{position:"fixed",zIndex:1200,left:0,right:0,top:0,display:"flex",justifyContent:"center",alignItems:"center",gap:8,padding:"6px 12px",background:user.acting_read_only?"#7c2d12":"#172554",color:"white",fontSize:12}}>
+        <strong>{user.acting_read_only?"VER COMO · SOMENTE LEITURA":"Administrador global"}</strong>
+        <select aria-label="Ver como filial" value={user.acting_branch_id||""} onChange={e=>void setActingContext(e.target.value?Number(e.target.value):null,user.acting_carrier_id||null)}><option value="">Todas as filiais</option>{actingBranches.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select>
+        <select aria-label="Ver como transportadora" value={user.acting_carrier_id||""} onChange={e=>void setActingContext(user.acting_branch_id||null,e.target.value?Number(e.target.value):null)}><option value="">Todas as transportadoras</option>{actingCarriers.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select>
+        {user.acting_read_only&&<button type="button" onClick={()=>void setActingContext(null,null)}>Sair do modo</button>}
+        {adminCount!==null&&adminCount>1&&<span title="Revise periodicamente as contas com acesso irrestrito.">⚠ {adminCount} administradores globais ativos</span>}
+      </div>}
+      {(!offlineQueue.online || offlineQueue.pending > 0) && (
+        <button className={`offline-queue-banner${offlineQueue.failed ? " has-error" : ""}`} type="button" onClick={() => void syncOfflineQueue()}>
+          <strong>{offlineQueue.online ? (offlineQueue.syncing ? "Sincronizando operação…" : `${offlineQueue.pending} ação(ões) aguardando envio`) : "Trabalhando sem internet"}</strong>
+          <span>{offlineQueue.online ? (offlineQueue.failed ? "Toque para tentar novamente" : "Os registros serão enviados em ordem") : "Pode continuar: suas ações estão salvas neste aparelho"}</span>
+        </button>
+      )}
       {appConsentRequired && <div className="app-consent-backdrop" role="presentation">
         <section className="app-consent-card" role="dialog" aria-modal="true" aria-labelledby="app-consent-title">
           <div className="app-consent-brand">ADIMAX · MOTORISTA</div>

@@ -15,13 +15,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.core.permissions import ROLE_EQUIVALENTS, Role, require_branch_access, require_roles, scope_by_branch
-from app.db.models import Attachment, Branch, DeliveryFailureReason, DockSession, Driver, Route, RouteOccurrence, RouteOccurrenceEvent, RouteObservation, RouteStop, RouteStopOperation, Checkin, User, Vehicle
+from app.core.permissions import (
+    ROLE_EQUIVALENTS, Role, has_all_branches_policy, has_all_environment_access,
+    require_branch_access, require_internal_permission, require_internal_roles, require_roles, scope_by_branch, user_branch_ids,
+)
+from app.db.models import Attachment, Branch, BranchApprovalPolicy, Carrier, CarrierBranch, CarrierUser, DeliveryFailureReason, DockSession, Driver, DriverBranch, Route, RouteCarrierChange, RouteOccurrence, RouteOccurrenceEvent, RouteObservation, RouteStop, RouteStopOperation, Checkin, User, Vehicle, VehicleBranch
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.modules.routes.schemas import (
     AdminRouteCorrectionIn, AdminStopCorrectionIn, CheckinIn, DeliverIn, RouteIn, RouteOut,
-    RouteUpdate, RouteAssignmentIn, RouteObservationIn, StopIn, StopUpdate, RouteAdministrativeIn, StopAdministrativeIn, StopCustomerNotesIn,
+    RouteUpdate, RouteAssignmentIn, RouteCarrierChangeIn, RouteObservationIn, StopIn, StopUpdate, RouteAdministrativeIn, StopAdministrativeIn, StopCustomerNotesIn,
 )
 from app.services.audit import format_changes, log, log_update, snapshot
 from app.services.events import EventType, notify_operational_audience, record_event
@@ -82,18 +85,71 @@ def _validate_route_resources(
     route_branch = db.get(Branch, branch_id)
     if route_branch is None:
         raise HTTPException(status_code=422, detail="Filial da rota não encontrada.")
+    policy = db.scalar(select(BranchApprovalPolicy).where(BranchApprovalPolicy.branch_id == branch_id))
     if driver_id is not None:
         driver = db.get(Driver, driver_id)
         if driver is None or driver.tenant_id != route_branch.tenant_id:
             raise HTTPException(status_code=422, detail="Motorista não pertence à empresa da rota.")
         if not driver.active or driver.blocked:
             raise HTTPException(status_code=422, detail="Motorista inativo ou bloqueado não pode ser escalado.")
+        availability = db.scalar(select(DriverBranch).where(DriverBranch.driver_id == driver_id, DriverBranch.branch_id == branch_id))
+        approval_required = bool(policy and policy.require_driver_approval)
+        if availability is None or not availability.active or (approval_required and availability.approval_status != "approved"):
+            raise HTTPException(status_code=422, detail="Motorista não está liberado para esta filial.")
     if vehicle_id is not None:
         vehicle = db.get(Vehicle, vehicle_id)
         if vehicle is None or vehicle.tenant_id != route_branch.tenant_id:
             raise HTTPException(status_code=422, detail="Veículo não pertence à empresa da rota.")
         if not vehicle.active or vehicle.blocked:
             raise HTTPException(status_code=422, detail="Veículo inativo ou bloqueado não pode ser escalado.")
+        availability = db.scalar(select(VehicleBranch).where(VehicleBranch.vehicle_id == vehicle_id, VehicleBranch.branch_id == branch_id))
+        approval_required = bool(policy and policy.require_vehicle_approval)
+        if availability is None or not availability.active or (approval_required and availability.approval_status != "approved"):
+            raise HTTPException(status_code=422, detail="Veículo não está liberado para esta filial.")
+def _validate_route_carrier(db: Session, branch_id: int, carrier_id: int | None) -> Carrier:
+    if carrier_id is None:
+        raise HTTPException(422, detail="Selecione a transportadora executora da rota.")
+    carrier = db.get(Carrier, carrier_id)
+    link = db.scalar(select(CarrierBranch).where(
+        CarrierBranch.carrier_id == carrier_id,
+        CarrierBranch.branch_id == branch_id,
+        CarrierBranch.active.is_(True),
+    ))
+    if carrier is None or not carrier.active or link is None:
+        raise HTTPException(422, detail="Transportadora inexistente, inativa ou não habilitada para a filial da rota.")
+    return carrier
+
+
+def _carrier_membership(db: Session, user: User) -> CarrierUser | None:
+    return db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+
+
+def _carrier_branch_ids(db: Session, user: User, carrier_id: int) -> set[int]:
+    """Filiais onde a transportadora está habilitada E o usuário tem acesso explícito.
+
+    Reaproveita a mesma fonte de verdade de app.core.permissions.user_branch_ids
+    (principal + UserBranchAccess), com atalho para escopos amplos (admin global
+    ou política 'todas as filiais, inclusive futuras'), para não divergir do
+    motor de permissões central caso essas regras evoluam.
+    """
+    carrier_branches = set(db.scalars(select(CarrierBranch.branch_id).where(
+        CarrierBranch.carrier_id == carrier_id, CarrierBranch.active.is_(True))).all())
+    if has_all_environment_access(user, db) or has_all_branches_policy(user, db):
+        return carrier_branches
+    return carrier_branches & user_branch_ids(user, db)
+
+
+def _guard_carrier_route_access(db: Session, user: User, route: Route) -> None:
+    acting_carrier_id = getattr(user, "acting_carrier_id", None) if user.role == Role.ADMIN_GLOBAL.value else None
+    if acting_carrier_id is not None and (route.carrier_assignment_status != "valid" or route.carrier_id != acting_carrier_id):
+        raise HTTPException(403, detail="Rota fora da transportadora selecionada no modo Ver como.")
+    membership = _carrier_membership(db, user)
+    if membership is None:
+        return
+    if route.carrier_assignment_status != "valid" or route.carrier_id != membership.carrier_id:
+        raise HTTPException(403, detail="Rota não atribuída à sua transportadora.")
+    if route.branch_id not in _carrier_branch_ids(db, user, membership.carrier_id):
+        raise HTTPException(403, detail="Rota fora das filiais autorizadas para o usuário.")
 
 
 def _safe_filename(filename: str | None) -> str:
@@ -348,8 +404,22 @@ def list_routes(
         selectinload(Route.dock_session),
     )
     linked_driver_ids = _driver_ids(db, user)
-    if linked_driver_ids:
+    carrier_membership = _carrier_membership(db, user)
+    acting_carrier_id = getattr(user, "acting_carrier_id", None) if user.role == Role.ADMIN_GLOBAL.value else None
+    if acting_carrier_id is not None:
+        stmt = stmt.where(Route.carrier_id == acting_carrier_id, Route.carrier_assignment_status == "valid")
+        stmt = scope_by_branch(stmt, Route.branch_id, user, db)
+    elif linked_driver_ids:
         stmt = stmt.where(Route.driver_id.in_(linked_driver_ids))
+    elif carrier_membership is not None:
+        allowed_branches = _carrier_branch_ids(db, user, carrier_membership.carrier_id)
+        if not allowed_branches:
+            return []
+        stmt = stmt.where(
+            Route.carrier_id == carrier_membership.carrier_id,
+            Route.carrier_assignment_status == "valid",
+            Route.branch_id.in_(allowed_branches),
+        )
     elif user.role not in {Role.MOTORISTA.value, Role.CLIENTE.value}:
         stmt = scope_by_branch(stmt, Route.branch_id, user, db)
     elif user.role == Role.MOTORISTA.value:
@@ -371,19 +441,20 @@ def list_routes(
 @router.get("/{route_id}", response_model=RouteOut)
 def get_route(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_customer_access(user, route)
     return route
 
 
 @router.post("", response_model=RouteOut,
-             dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
+             dependencies=[Depends(require_internal_permission("module.routes", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
 def create_route(data: RouteIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_branch_access(db, user, data.branch_id)
+    _validate_route_carrier(db, data.branch_id, data.carrier_id)
     _validate_route_resources(db, data.branch_id, data.driver_id, data.vehicle_id)
     payload = data.model_dump(exclude={"stops"})
-    route = Route(**payload, created_by=user.id)
+    route = Route(**payload, carrier_assignment_status="valid", carrier_assignment_issue=None, created_by=user.id)
     route.dock_session = DockSession()
     for s in data.stops:
         route.stops.append(RouteStop(**s.model_dump()))
@@ -396,7 +467,7 @@ def create_route(data: RouteIn, db: Session = Depends(get_db), user: User = Depe
 
 # ----------------------- Edição de rota e paradas -----------------------
 
-_EDITOR = Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))
+_EDITOR = Depends(require_internal_permission("module.routes", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))
 
 
 def _guard_not_cancelled(route: Route) -> None:
@@ -404,7 +475,7 @@ def _guard_not_cancelled(route: Route) -> None:
         raise HTTPException(status_code=409, detail="Rota cancelada não pode ser alterada.")
 
 
-@router.delete("/{route_id}/exclude", dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
+@router.delete("/{route_id}/exclude", dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
 def exclude_route(route_id: int,
                   db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Marca a rota como excluída da visão do tenant (soft delete).
@@ -412,7 +483,7 @@ def exclude_route(route_id: int,
     route = db.scalar(select(Route).where(Route.id == route_id))
     if route is None:
         raise HTTPException(status_code=404, detail="Rota não encontrada.")
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     route.excluded = True
     log(db, user_id=user.id, action="exclude", entity="route", entity_id=route.id,
         detail=f"Rota {route.codigo_ut} excluída da visão do tenant.")
@@ -425,7 +496,7 @@ def update_route(route_id: int, data: RouteUpdate,
                  db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Edita os dados da rota (cabeçalho). Permitido salvo se cancelada."""
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     updates = data.model_dump(exclude_unset=True)
     _validate_route_resources(
@@ -448,7 +519,7 @@ def add_stop(route_id: int, data: StopIn,
              db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Adiciona uma parada manual à rota."""
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     payload = data.model_dump()
     if not payload.get("sequence"):
@@ -468,7 +539,7 @@ def update_stop(route_id: int, stop_id: int, data: StopUpdate,
                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Edita os detalhes de uma parada (endereço, cidade, peso, etc.)."""
     route, stop = _get_stop(db, route_id, stop_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     updates = data.model_dump(exclude_unset=True)
     before = snapshot(stop, list(updates))
@@ -484,7 +555,7 @@ def update_stop(route_id: int, stop_id: int, data: StopUpdate,
 def delete_stop(route_id: int, stop_id: int,
                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route, stop = _get_stop(db, route_id, stop_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     fields = ["sequence", "customer_name", "customer_address", "city", "planned_date", "planned_time",
               "temperature", "stop_type", "weight_kg", "pallets", "order_number", "status"]
@@ -514,7 +585,7 @@ def optimize_sequence(route_id: int,
                       db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Calcula e salva uma sugestão sem alterar a sequência original do cliente."""
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     result = optimize_route(db, route)
     if not result["success"]:
@@ -530,7 +601,7 @@ def optimize_sequence(route_id: int,
 
 def _set_dock_time(db, route_id, user, field, event_type, status_after=None):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -580,7 +651,7 @@ def loading_finish(route_id: int, db: Session = Depends(get_db), user: User = De
              dependencies=[_OP])
 def operator_release(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -616,7 +687,7 @@ def assign_route(route_id: int, data: RouteAssignmentIn,
                  db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Escala somente motorista e veículo já cadastrados."""
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     updates = data.model_dump()
     _validate_route_resources(db, route.branch_id, updates["driver_id"], updates["vehicle_id"])
@@ -628,11 +699,46 @@ def assign_route(route_id: int, data: RouteAssignmentIn,
     return _load(db, route.id)
 
 
+@router.post("/{route_id}/change-carrier", response_model=RouteOut,
+             dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL))])
+def change_route_carrier(route_id: int, data: RouteCarrierChangeIn,
+                         db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Troca transacional: altera acesso, limpa escala e grava log imutável."""
+    route = _load(db, route_id)
+    if user.role != Role.ADMIN_GLOBAL.value:
+        raise HTTPException(403, detail="Somente o Administrador Global Adimax pode alterar a transportadora.")
+    new_carrier = _validate_route_carrier(db, route.branch_id, data.carrier_id)
+    if route.carrier_id == new_carrier.id and route.carrier_assignment_status == "valid":
+        raise HTTPException(409, detail="A transportadora selecionada já executa esta rota.")
+    reason = data.reason.strip()
+    if len(reason) < 5:
+        raise HTTPException(422, detail="Informe um motivo com pelo menos cinco caracteres.")
+    previous_carrier_id, previous_driver_id, previous_vehicle_id = route.carrier_id, route.driver_id, route.vehicle_id
+    db.add(RouteCarrierChange(
+        route_id=route.id, branch_id=route.branch_id,
+        previous_carrier_id=previous_carrier_id, new_carrier_id=new_carrier.id,
+        changed_by_id=user.id, reason=reason,
+        previous_driver_id=previous_driver_id, previous_vehicle_id=previous_vehicle_id,
+        route_status=route.status,
+    ))
+    route.carrier_id = new_carrier.id
+    route.carrier_assignment_status = "valid"
+    route.carrier_assignment_issue = None
+    route.driver_id = None
+    route.vehicle_id = None
+    log(db, user_id=user.id, action="change_carrier", entity="route", entity_id=route.id,
+        detail=(f"branch_id={route.branch_id}; carrier_id: {previous_carrier_id} -> {new_carrier.id}; "
+                f"driver_id removido={previous_driver_id}; vehicle_id removido={previous_vehicle_id}; "
+                f"status={route.status}; motivo={reason}"))
+    db.commit()
+    return _load(db, route.id)
+
+
 @router.post("/{route_id}/refresh-map", status_code=202, dependencies=[_EDITOR])
 def refresh_route_map(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Enfileira a atualização do mapa, mantendo a sequência operacional."""
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     route.routing_status = "processing"
     route.routing_error = None
@@ -647,10 +753,10 @@ def refresh_route_map(route_id: int, db: Session = Depends(get_db), user: User =
     return {"queued": True, "route_id": route.id, "message": "Atualização do mapa iniciada."}
 
 @router.put("/{route_id}/administrative", response_model=RouteOut,
-            dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO, Role.TORRE_CONTROLE))])
+            dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO, Role.TORRE_CONTROLE))])
 def update_route_administrative(route_id: int, data: RouteAdministrativeIn,
                                 db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    route = _load(db, route_id); require_branch_access(db, user, route.branch_id); _guard_planning_change(route, user)
+    route = _load(db, route_id); require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route); _guard_planning_change(route, user)
     updates = data.model_dump(exclude_unset=True)
     before = snapshot(route, list(updates))
     for field, value in updates.items(): setattr(route, field, value)
@@ -660,10 +766,10 @@ def update_route_administrative(route_id: int, data: RouteAdministrativeIn,
 
 
 @router.post("/{route_id}/observations", response_model=RouteOut,
-             dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO, Role.TORRE_CONTROLE))])
+             dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO, Role.TORRE_CONTROLE))])
 def add_route_observation(route_id: int, data: RouteObservationIn,
                           db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    route = _load(db, route_id); require_branch_access(db, user, route.branch_id); _guard_planning_change(route, user)
+    route = _load(db, route_id); require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route); _guard_planning_change(route, user)
     sequence = max((item.sequence for item in route.observations), default=0) + 1
     note = RouteObservation(route_id=route.id, sequence=sequence, text=data.text.strip(), created_by=user.id)
     db.add(note); db.flush()
@@ -673,10 +779,10 @@ def add_route_observation(route_id: int, data: RouteObservationIn,
 
 
 @router.put("/{route_id}/stops/{stop_id}/administrative", response_model=RouteOut,
-            dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
+            dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL))])
 def update_stop_administrative(route_id: int, stop_id: int, data: StopAdministrativeIn,
                                db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    route, stop = _get_stop(db, route_id, stop_id); require_branch_access(db, user, route.branch_id); _guard_planning_change(route, user)
+    route, stop = _get_stop(db, route_id, stop_id); require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route); _guard_planning_change(route, user)
     updates = data.model_dump(exclude_unset=True); before = snapshot(stop, list(updates))
     for field, value in updates.items(): setattr(stop, field, value)
     log_update(db, user_id=user.id, entity="route_stop_administrative", entity_id=stop.id,
@@ -688,7 +794,7 @@ def update_stop_administrative(route_id: int, stop_id: int, data: StopAdministra
             dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.CLIENTE))])
 def update_stop_customer_notes(route_id: int, stop_id: int, data: StopCustomerNotesIn,
                                db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    route, stop = _get_stop(db, route_id, stop_id); require_branch_access(db, user, route.branch_id)
+    route, stop = _get_stop(db, route_id, stop_id); require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_customer_access(user, route)
     _guard_planning_change(route, user)
     updates = data.model_dump(exclude_unset=True); before = snapshot(stop, list(updates))
@@ -701,7 +807,7 @@ def update_stop_customer_notes(route_id: int, stop_id: int, data: StopCustomerNo
 @router.post("/{route_id}/apply-optimized-sequence", response_model=RouteOut, dependencies=[_EDITOR])
 def apply_optimized_sequence(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     if not route.stops or any(stop.optimized_sequence is None for stop in route.stops):
         raise HTTPException(status_code=409, detail="Calcule uma sugestão de roteirização antes de aplicá-la.")
@@ -717,7 +823,7 @@ def apply_optimized_sequence(route_id: int, db: Session = Depends(get_db), user:
 @router.post("/{route_id}/depart", response_model=RouteOut, dependencies=[_OP])
 def depart_cd(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -820,7 +926,7 @@ def _create_return_occurrence(
 def checkin(route_id: int, stop_id: int, data: CheckinIn,
             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route, stop = _get_stop(db, route_id, stop_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -844,7 +950,7 @@ def checkin(route_id: int, stop_id: int, data: CheckinIn,
 def deliver(route_id: int, stop_id: int, data: DeliverIn,
             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route, stop = _get_stop(db, route_id, stop_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -908,7 +1014,7 @@ async def deliver_with_proof(
     user: User = Depends(get_current_user),
 ):
     route, stop = _get_stop(db, route_id, stop_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -985,7 +1091,7 @@ async def upload_warehouse_return_proof(
     user: User = Depends(get_current_user),
 ):
     route, stop = _get_stop(db, route_id, stop_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -1016,7 +1122,7 @@ async def upload_empty_truck_photo(
     user: User = Depends(get_current_user),
 ):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -1039,7 +1145,7 @@ async def upload_loaded_return_photo(
     user: User = Depends(get_current_user),
 ):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user, db)
@@ -1057,10 +1163,10 @@ async def upload_loaded_return_photo(
 
 
 @router.post("/{route_id}/close", response_model=RouteOut,
-             dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
+             dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
 def close_route(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_editable(route)
     _guard_not_expired(route, user)
     if not route.dock_session or not route.dock_session.departure_cd_at:
@@ -1082,7 +1188,7 @@ def close_route(route_id: int, db: Session = Depends(get_db), user: User = Depen
 def reopen_route(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Reabre uma rota encerrada para correções. Só administrador global."""
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     if route.status not in CLOSED_STATES:
         raise HTTPException(status_code=409, detail="Apenas rotas finalizadas/canceladas podem ser reabertas.")
     before = snapshot(route, ["status", "closed_at"])
@@ -1218,7 +1324,7 @@ def admin_stop_correction(
 def force_start_route(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Força o início da rota ignorando o fluxo de doca (preenche todos os passos com now)."""
     route = _load(db, route_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_editable(route)
     now = datetime.now(timezone.utc)
     route_before = snapshot(route, ["status", "actual_departure_at"])
@@ -1260,7 +1366,7 @@ async def replace_requested_proof(
     db: Session = Depends(get_db), user: User = Depends(get_current_user),
 ):
     route, stop = _get_stop(db, route_id, stop_id)
-    require_branch_access(db, user, route.branch_id)
+    require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_driver_assignment(db, user, route)
     if stop.status not in {"entregue", "falha"}:
         raise HTTPException(409, "Esta parada ainda não foi encerrada.")

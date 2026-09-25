@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import api from "../services/api";
+import { useAuth } from "../context/AuthContext";
 
 interface ProofReport {
   route_id: number;
@@ -28,6 +29,7 @@ interface AuditReport {
   created_at: string;
 }
 interface ReportOverview {operation:{routes:number;completed:number;in_transit:number;cancelled:number;completion_rate:number;by_status:{label:string;value:number}[]};control:{occurrences_open:number;tasks_open:number;tasks_in_progress:number;tasks_returned:number};fleet:{maintenance_open:number;maintenance_overdue:number;tires_total:number;tires_attention:number;parts_low:number}}
+interface RoutePayment { route_id:number; codigo_ut:string; route_date:string; status:string; driver_name?:string|null; carrier_name?:string|null; driver_payment_amount?:number|null }
 
 function currentMonthRange() {
   const now = new Date();
@@ -38,13 +40,15 @@ function currentMonthRange() {
 
 export default function Reports() {
   const { t, i18n } = useTranslation();
+  const { user } = useAuth();
   const initial = currentMonthRange();
   const [start, setStart] = useState(initial.start);
   const [end, setEnd] = useState(initial.end);
-  const [activeTab, setActiveTab] = useState<"overview" | "operation" | "audit">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "payments" | "operation" | "audit">("overview");
   const [overview,setOverview]=useState<ReportOverview|null>(null);
   const [proofs, setProofs] = useState<ProofReport[]>([]);
   const [auditRows, setAuditRows] = useState<AuditReport[]>([]);
+  const [payments, setPayments] = useState<RoutePayment[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
@@ -59,6 +63,10 @@ export default function Reports() {
     setUpdatedAt(null);
     if(tab==="overview"){
       try{const response=await api.get<ReportOverview>("/reports/overview",{params:params()});setOverview(response.data);setUpdatedAt(new Date().toLocaleTimeString(i18n.language))}catch(err:any){setError(formatApiError(err?.response?.data?.detail)??"Não foi possível carregar o resumo gerencial.")}finally{setLoading(false)}
+      return;
+    }
+    if(tab==="payments"){
+      try{const response=await api.get<RoutePayment[]>("/reports/route-payments",{params:params()});setPayments(response.data);setUpdatedAt(new Date().toLocaleTimeString(i18n.language))}catch(err:any){setError(formatApiError(err?.response?.data?.detail)??"Não foi possível carregar a conciliação de rotas.")}finally{setLoading(false)}
       return;
     }
     if (tab === "operation") {
@@ -149,15 +157,20 @@ export default function Reports() {
 
       <div className="report-tabs" role="tablist" aria-label={t("rep.tabs_aria")}>
         <button type="button" className={activeTab === "overview" ? "active" : ""} onClick={() => setActiveTab("overview")}><IconDashboard/><span>Visão geral</span></button>
+        <button type="button" className={activeTab === "payments" ? "active" : ""} onClick={() => setActiveTab("payments")}><IconRoutes/><span>Conciliação de rotas</span></button>
+        {!(["gestor_financeiro","diretoria"].includes(user?.role||"")) && <>
         <button type="button" className={activeTab === "operation" ? "active" : ""} onClick={() => setActiveTab("operation")}>
           <IconRoutes /> <span>{t("rep.tab_operation")}</span>
         </button>
         <button type="button" className={activeTab === "audit" ? "active" : ""} onClick={() => setActiveTab("audit")}>
           <IconAudit /> <span>{t("rep.tab_audit")}</span>
         </button>
+        </>}
       </div>
 
-      {activeTab === "overview" && overview ? <Overview data={overview}/> : activeTab === "audit" ? (
+      {activeTab === "overview" && overview ? <Overview data={overview}/> : activeTab === "payments" ? (
+        <div className="table-scroll"><table className="data-table"><thead><tr><th>Data</th><th>Rota</th><th>Motorista</th><th>Transportadora</th><th>Status</th><th>Valor motorista</th></tr></thead><tbody>{payments.map(row=><tr key={row.route_id}><td>{new Date(`${row.route_date}T12:00:00`).toLocaleDateString(i18n.language)}</td><td>{row.codigo_ut}</td><td>{row.driver_name||"-"}</td><td>{row.carrier_name||"-"}</td><td>{row.status}</td><td>{row.driver_payment_amount==null?"Não informado":row.driver_payment_amount.toLocaleString(i18n.language,{style:"currency",currency:"BRL"})}</td></tr>)}</tbody></table>{!payments.length&&!loading&&<p className="empty-state">Nenhuma rota no período.</p>}</div>
+      ) : activeTab === "audit" ? (
         <div className="table-scroll">
           <table className="data-table">
             <thead>

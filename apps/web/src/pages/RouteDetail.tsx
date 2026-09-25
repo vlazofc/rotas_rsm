@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
 import api from "../services/api";
+import { isNetworkAvailable } from "../services/offlineQueue";
 import {appConfirm} from "../components/AppDialog";
 import { applyTimemark } from "../services/timemark";
 import { useAuth } from "../context/AuthContext";
@@ -46,7 +47,7 @@ interface Dock {
   loading_minutes?: number | null; total_cd_minutes?: number | null;
 }
 interface RouteData {
-  id: number; codigo_ut: string; route_date: string; origin_name?: string | null;
+  id: number; branch_id: number; carrier_id?: number | null; carrier_assignment_status?: string; carrier_assignment_issue?: string | null; codigo_ut: string; route_date: string; origin_name?: string | null;
   origin_address?: string | null; driver_id?: number | null; vehicle_id?: number | null;
   status: string; stops: Stop[]; dock_session?: Dock | null;
   source?: string; fieldeas_description?: string | null; fieldeas_sync_at?: string | null;
@@ -59,6 +60,7 @@ interface RouteData {
 interface Driver { id: number; name: string; employment_type?: "proprio" | "agregado"; daily_rate?: number | null; }
 interface Vehicle { id: number; plate: string; vehicle_type_code?: string | null; vehicle_type_label?: string | null; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
+interface Carrier { id: number; name: string; document?: string | null; active: boolean; }
 
 const STATUS_COLOR: Record<string, string> = {
   planejada: "#64748b", em_carregamento: "#0ea5e9", liberada: "#a855f7",
@@ -80,6 +82,9 @@ export default function RouteDetail() {
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [vehicleTypes, setVehicleTypes] = useState<{code: string; label: string}[]>([]);
   const [reasons, setReasons] = useState<Reason[]>([]);
+  const [carriers, setCarriers] = useState<Carrier[]>([]);
+  const [changeCarrierOpen, setChangeCarrierOpen] = useState(false);
+  const [carrierChange, setCarrierChange] = useState({ carrier_id: "", reason: "" });
   const [proofStop, setProofStop] = useState<Stop | null>(null);
   const [proofFile, setProofFile] = useState<File | null>(null);
   const [proofError, setProofError] = useState("");
@@ -120,10 +125,40 @@ export default function RouteDetail() {
     })).catch(() => {});
   }, []);
 
-  const reload = () => api.get(`/routes/${id}`).then((r) => setRoute(r.data)).catch(() => {
+  const reload = () => {
+    if (!isNetworkAvailable()) return Promise.resolve();
+    return api.get(`/routes/${id}`).then((r) => setRoute(r.data)).catch(() => {
     // Em refresh de fundo, não sobrepõe a tela já carregada com mensagem de erro.
     setRoute((prev) => { if (prev === null) setError(t("rd.load_error")); return prev; });
-  });
+    });
+  };
+
+  const applyOfflineDockAction = (action: string) => {
+    const now = new Date().toISOString();
+    setRoute((current) => {
+      if (!current) return current;
+      const dock = { ...(current.dock_session ?? {}) };
+      if (action === "arrive-cd") dock.arrival_cd_at = now;
+      if (action === "enter-dock") dock.dock_entry_at = now;
+      if (action === "loading-start") dock.loading_started_at = now;
+      if (action === "loading-finish") dock.loading_finished_at = now;
+      if (action === "release") { dock.operator_released_at = now; dock.departure_cd_at = now; }
+      return { ...current, dock_session: dock, status: action === "release" ? "em_rota" : current.status };
+    });
+  };
+
+  const applyOfflineStopAction = (stopId: number, status: "em_rota" | "entregue" | "falha") => {
+    const now = new Date().toISOString();
+    setRoute((current) => current ? {
+      ...current,
+      stops: current.stops.map((stop) => stop.id === stopId ? {
+        ...stop,
+        status,
+        checkin_at: stop.checkin_at ?? now,
+        delivered_at: status === "entregue" || status === "falha" ? now : stop.delivered_at,
+      } : stop),
+    } : current);
+  };
 
   useEffect(() => {
     reload();
@@ -136,6 +171,32 @@ export default function RouteDetail() {
   // Mantém os dados da rota e das paradas atualizados sem exigir F5,
   // já que outros utilizadores (motorista, operador) podem alterar o status em paralelo.
   usePolling(reload, REFRESH_INTERVAL_MS);
+
+  useEffect(() => {
+    const refreshAfterSync = () => { void reload(); };
+    window.addEventListener("adimax-offline-synced", refreshAfterSync);
+    return () => window.removeEventListener("adimax-offline-synced", refreshAfterSync);
+  }, [id]);
+
+  useEffect(() => {
+    if (!route?.branch_id || user?.role !== "admin_global") return;
+    api.get(`/access-model/branches/${route.branch_id}`).then(response => setCarriers(response.data.carriers.filter((item: Carrier) => item.active))).catch(() => setCarriers([]));
+  }, [route?.branch_id, user?.role]);
+
+  async function changeCarrier() {
+    const next = carriers.find(item => String(item.id) === carrierChange.carrier_id);
+    const current = carriers.find(item => item.id === route?.carrier_id);
+    if (!route || !next || carrierChange.reason.trim().length < 5) return;
+    const confirmed = await appConfirm(
+      `Rota: ${route.codigo_ut} · Filial #${route.branch_id}\nTransportadora atual: ${current?.name || "Pendente"}\nNova transportadora: ${next.name}\n\n${current?.name || "A transportadora anterior"} perderá o acesso, e ${next.name} passará a visualizar a rota. O motorista e o veículo serão desvinculados, exigindo nova atribuição.`,
+      { title: "Confirmar alteração de transportadora?", confirmLabel: "Confirmar alteração", danger: true },
+    );
+    if (!confirmed) return;
+    try {
+      await api.post(`/routes/${route.id}/change-carrier`, { carrier_id: next.id, reason: carrierChange.reason.trim() });
+      setChangeCarrierOpen(false); setCarrierChange({ carrier_id: "", reason: "" }); await reload();
+    } catch (err: any) { setModalError(formatApiError(err?.response?.data?.detail) ?? "Não foi possível alterar a transportadora."); }
+  }
 
   if (!route) return <p>{error || t("common.loading")}</p>;
 
@@ -194,7 +255,10 @@ export default function RouteDetail() {
 
   async function dock(action: string) {
     setError("");
-    try { await api.post(`/routes/${id}/${action}`); reload(); }
+    try {
+      const response = await api.post(`/routes/${id}/${action}`);
+      if (response.status === 202) applyOfflineDockAction(action); else reload();
+    }
     catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
 
@@ -248,8 +312,8 @@ export default function RouteDetail() {
   async function checkin(s: Stop) {
     try {
       const pos = await getCurrentPosition();
-      await api.post(`/routes/${id}/stops/${s.id}/checkin`, pos ?? {});
-      reload();
+      const response = await api.post(`/routes/${id}/stops/${s.id}/checkin`, pos ?? {});
+      if (response.status === 202) applyOfflineStopAction(s.id, "em_rota"); else reload();
     } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
   function openProof(s: Stop) {
@@ -262,8 +326,8 @@ export default function RouteDetail() {
   async function deliverLoaded(s: Stop) {
     try {
       const pos = await getCurrentPosition();
-      await api.post(`/routes/${id}/stops/${s.id}/deliver`, { success: true, ...(pos ?? {}) });
-      reload();
+      const response = await api.post(`/routes/${id}/stops/${s.id}/deliver`, { success: true, ...(pos ?? {}) });
+      if (response.status === 202) applyOfflineStopAction(s.id, "entregue"); else reload();
     } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
   async function confirmDeliveryProof(e: React.FormEvent) {
@@ -277,8 +341,10 @@ export default function RouteDetail() {
     try {
       const pos = await getCurrentPosition();
       if (pos) { payload.set("latitude", String(pos.latitude)); payload.set("longitude", String(pos.longitude)); }
-      await api.post(`/routes/${id}/stops/${proofStop!.id}/deliver-with-proof`, payload);
-      setProofStop(null); setProofFile(null); reload();
+      const stopId = proofStop!.id;
+      const response = await api.post(`/routes/${id}/stops/${stopId}/deliver-with-proof`, payload);
+      setProofStop(null); setProofFile(null);
+      if (response.status === 202) applyOfflineStopAction(stopId, "entregue"); else reload();
     } catch (err: any) { setProofError(formatApiError(err?.response?.data?.detail) ?? t("rd.action_error")); }
     finally { setProofSaving(false); }
   }
@@ -303,8 +369,10 @@ export default function RouteDetail() {
     try {
       const pos = await getCurrentPosition();
       if (pos) { payload.set("latitude", String(pos.latitude)); payload.set("longitude", String(pos.longitude)); }
-      await api.post(`/routes/${id}/stops/${failStop!.id}/deliver-with-proof`, payload);
-      setFailStop(null); setFailFile(null); reload();
+      const stopId = failStop!.id;
+      const response = await api.post(`/routes/${id}/stops/${stopId}/deliver-with-proof`, payload);
+      setFailStop(null); setFailFile(null);
+      if (response.status === 202) applyOfflineStopAction(stopId, "falha"); else reload();
     } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.action_error")); }
   }
   function openWarehouseProof(s: Stop) {
@@ -448,6 +516,7 @@ export default function RouteDetail() {
           <span title="Manual" style={{ color: "#f59e0b", fontWeight: 800, fontSize: 18, lineHeight: 1 }}>*</span>
         ) : null}
         {isAdmin && <button style={mini} onClick={openRouteCorrection}>{t("rd.admin_correction")}</button>}
+        {isAdmin && <button style={mini} onClick={() => { setModalError(""); setCarrierChange({ carrier_id: "", reason: "" }); setChangeCarrierOpen(true); }}>Alterar transportadora</button>}
         {(isAdmin || hasRole("gestor_brasil")) && (
           <button style={miniDanger} onClick={excludeRoute}>{t("rd.exclude_route")}</button>
         )}
@@ -469,6 +538,7 @@ export default function RouteDetail() {
             <Info label={t("rd.address")} value={route.origin_address ?? "—"} />
             <Info label={t("route.driver")} value={driverName(route.driver_id)} />
             <Info label={t("route.vehicle")} value={vehiclePlate(route.vehicle_id)} />
+            <Info label="Transportadora executora" value={carriers.find(item => item.id === route.carrier_id)?.name ?? (route.carrier_assignment_status === "pending_carrier" ? "Pendente de correção" : "—")} />
             {(route.vehicle_requested || route.vehicle_sent) && (
               <>
                 <Info label={t("rd.vehicle_requested")} value={route.vehicle_requested ?? "—"} />
@@ -563,6 +633,26 @@ export default function RouteDetail() {
           </div>
         )}
       </div>
+
+      {changeCarrierOpen && (
+        <div className="modal-backdrop" onClick={() => setChangeCarrierOpen(false)}>
+          <section className="modal-card driver-modal" onClick={event => event.stopPropagation()}>
+            <h3>Alterar transportadora</h3>
+            {modalError && <p style={{ color: "#c00" }}>{modalError}</p>}
+            <Field label="Nova transportadora habilitada">
+              <select style={input} value={carrierChange.carrier_id} onChange={event => setCarrierChange({ ...carrierChange, carrier_id: event.target.value })}>
+                <option value="">Selecione</option>
+                {carriers.filter(item => item.id !== route.carrier_id).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Motivo obrigatório">
+              <textarea style={{ ...input, minHeight: 90 }} required value={carrierChange.reason} onChange={event => setCarrierChange({ ...carrierChange, reason: event.target.value })} />
+            </Field>
+            <p style={{ fontSize: 13, color: "var(--muted)" }}>A confirmação revoga o acesso anterior e desvincula motorista e veículo. Os registros operacionais já realizados permanecem preservados.</p>
+            <div><button style={primary} disabled={!carrierChange.carrier_id || carrierChange.reason.trim().length < 5} onClick={() => void changeCarrier()}>Revisar e confirmar</button><button style={ghost} onClick={() => setChangeCarrierOpen(false)}>Cancelar</button></div>
+          </section>
+        </div>
+      )}
 
       {/* ---------- Doca / CD (nível da rota) ---------- */}
       <div style={card}>

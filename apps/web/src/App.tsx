@@ -18,6 +18,8 @@ const Gallery = lazy(() => import("./pages/Gallery"));
 const Tracking = lazy(() => import("./pages/Tracking"));
 const Drivers = lazy(() => import("./pages/Drivers"));
 const Vehicles = lazy(() => import("./pages/Vehicles"));
+const Carriers = lazy(() => import("./pages/Carriers"));
+const Branches = lazy(() => import("./pages/Branches"));
 const Reports = lazy(() => import("./pages/Reports"));
 const Users = lazy(() => import("./pages/Users"));
 const Profiles = lazy(() => import("./pages/Profiles"));
@@ -66,9 +68,18 @@ function RequireRole({ roles, children }: { roles: string[]; children: JSX.Eleme
   return hasRole(...roles) ? children : <Navigate to="/" replace />;
 }
 
+function RequirePermission({ permission, roles, children, internalOnly=false }: { permission:string; roles:string[]; children:JSX.Element; internalOnly?:boolean }) {
+  const { user, hasPermission, loading } = useAuth();
+  if (loading) return <Loading />;
+  if (internalOnly && user?.is_carrier_master) return <Navigate to="/" replace />;
+  return hasPermission(permission, ...roles) ? children : <Navigate to="/" replace />;
+}
+
 function HomePage() {
   const { user } = useAuth();
-  return user?.role === "motorista" ? <Navigate to="/routes" replace /> : <Dashboard />;
+  if (user?.role === "motorista") return <Navigate to="/routes" replace />;
+  if (user?.role === "gestor_financeiro" || user?.role === "diretoria") return <Navigate to="/reports" replace />;
+  return <Dashboard />;
 }
 
 export default function App() {
@@ -82,16 +93,18 @@ export default function App() {
         <Route element={<RequireAuth><Layout><Outlet /></Layout></RequireAuth>}>
           <Route path="/" element={<HomePage />} />
           <Route path="/routes" element={<RoutesPage />} />
-          <Route path="/routing" element={<RequireRole roles={["admin_global", "gestor_brasil", "operador_logistico", "torre_controle"]}><Routing /></RequireRole>} />
-          <Route path="/routing/manual" element={<RequireRole roles={["admin_global", "gestor_brasil", "operador_logistico", "torre_controle"]}><ManualRouting /></RequireRole>} />
+          <Route path="/routing" element={<RequirePermission internalOnly permission="module.monitoring" roles={["gestor_brasil", "operador_logistico", "torre_controle"]}><Routing /></RequirePermission>} />
+          <Route path="/routing/manual" element={<RequirePermission internalOnly permission="module.routing" roles={["gestor_brasil", "operador_logistico", "torre_controle"]}><ManualRouting /></RequirePermission>} />
           <Route path="/routes/:id" element={<RouteDetail />} />
           <Route path="/occurrences" element={<Occurrences />} />
           <Route path="/tracking" element={<Tracking />} />
-          <Route path="/gallery" element={<RequireRole roles={["admin_global", "gestor_brasil", "auditor", "operador_logistico", "torre_controle"]}><Gallery /></RequireRole>} />
-          <Route path="/config/drivers" element={<RequireRole roles={["admin_global", "gestor_brasil", "operador_logistico"]}><Drivers /></RequireRole>} />
-          <Route path="/config/vehicles" element={<RequireRole roles={["admin_global", "gestor_brasil", "operador_logistico"]}><Vehicles /></RequireRole>} />
-          <Route path="/reports" element={<RequireRole roles={["admin_global", "gestor_brasil", "auditor"]}><Reports /></RequireRole>} />
-          <Route path="/users" element={<RequireRole roles={["admin_global", "gestor_brasil"]}><Users /></RequireRole>} />
+          <Route path="/gallery" element={<RequirePermission permission="module.gallery" roles={["gestor_brasil", "auditor", "operador_logistico", "torre_controle"]}><Gallery /></RequirePermission>} />
+          <Route path="/config/drivers" element={<RequirePermission permission="module.drivers" roles={["gestor_brasil", "operador_logistico"]}><Drivers /></RequirePermission>} />
+          <Route path="/config/vehicles" element={<RequirePermission permission="module.vehicles" roles={["gestor_brasil", "operador_logistico"]}><Vehicles /></RequirePermission>} />
+          <Route path="/carriers" element={<RequirePermission internalOnly permission="module.carriers" roles={["gestor_brasil"]}><Carriers /></RequirePermission>} />
+          <Route path="/config/branches" element={<RequirePermission internalOnly permission="module.branches" roles={["gestor_brasil"]}><Branches /></RequirePermission>} />
+          <Route path="/reports" element={<RequirePermission internalOnly permission="module.reports" roles={["gestor_brasil", "gestor_financeiro", "auditor", "diretoria"]}><Reports /></RequirePermission>} />
+          <Route path="/users" element={<RequirePermission permission="module.users" roles={["gestor_brasil"]}><Users /></RequirePermission>} />
           <Route path="/profiles" element={<RequireRole roles={["admin_global"]}><Profiles /></RequireRole>} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

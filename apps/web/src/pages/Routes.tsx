@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import api from "../services/api";
+import { isNetworkAvailable } from "../services/offlineQueue";
 import { importRoutes } from "../services/importRoutes";
 import { applyTimemark } from "../services/timemark";
 import { useAuth } from "../context/AuthContext";
@@ -22,7 +23,7 @@ interface Stop {
 }
 interface RouteItem {
   id: number; branch_id: number; codigo_ut: string; route_date: string; origin_name?: string | null;
-  origin_address?: string | null; driver_id?: number | null; vehicle_id?: number | null;
+  origin_address?: string | null; carrier_id?: number | null; driver_id?: number | null; vehicle_id?: number | null;
   status: string; stops: Stop[]; dock_session?: DockSession | null;
   source?: string; fieldeas_description?: string | null; fieldeas_sync_at?: string | null;
   empty_truck_photo_attachment_id?: number | null;
@@ -45,6 +46,7 @@ type RouteFilter = "open" | "backlog" | "closed" | "all";
 type RouteView = "map" | "assignments";
 interface Driver { id: number; name: string; active: boolean; }
 interface Vehicle { id: number; plate: string; active: boolean; }
+interface Carrier { id: number; name: string; active: boolean; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
 
 interface SearchableAssignmentSelectProps {
@@ -122,6 +124,7 @@ export default function RoutesPage() {
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [carriers, setCarriers] = useState<Carrier[]>([]);
   const [reasons, setReasons] = useState<Reason[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState<number | null>(() => {
     const stored = Number(localStorage.getItem(`adimax:selected-route:${user?.id ?? "session"}`));
@@ -159,17 +162,53 @@ export default function RoutesPage() {
   const [error, setError] = useState("");
   const [importOpen, setImportOpen] = useState(false);
 
-  const reload = () => api.get<RouteItem[]>("/routes").then((r) => setRoutes(r.data)).catch(() => { setError("Sem conexão para atualizar as rotas. Exibindo os últimos dados recebidos."); });
+  const reload = () => {
+    if (!isNetworkAvailable()) return Promise.resolve();
+    return api.get<RouteItem[]>("/routes").then((r) => setRoutes(r.data)).catch(() => { setError("Sem conexão para atualizar as rotas. Exibindo os últimos dados recebidos."); });
+  };
+
+  const applyOfflineRouteAction = (routeId: number, action: string) => {
+    const now = new Date().toISOString();
+    setRoutes((current) => current.map((route) => {
+      if (route.id !== routeId) return route;
+      const dock = { ...(route.dock_session ?? {}) };
+      if (action === "arrive-cd") dock.arrival_cd_at = now;
+      if (action === "release") { dock.operator_released_at = now; dock.departure_cd_at = now; }
+      return { ...route, dock_session: dock, status: action === "release" ? "em_rota" : route.status };
+    }));
+  };
+
+  const applyOfflineStopAction = (routeId: number, stopId: number, status: "em_rota" | "entregue" | "falha") => {
+    const now = new Date().toISOString();
+    setRoutes((current) => current.map((route) => route.id === routeId ? {
+      ...route,
+      stops: route.stops.map((stop) => stop.id === stopId ? {
+        ...stop,
+        status,
+        checkin_at: stop.checkin_at ?? now,
+        delivered_at: status === "entregue" || status === "falha" ? now : stop.delivered_at,
+      } : stop),
+    } : route));
+  };
   useEffect(() => {
     reload();
-    api.get("/drivers").then((r) => setDrivers(r.data)).catch(() => setDrivers([]));
-    api.get("/vehicles").then((r) => setVehicles(r.data)).catch(() => setVehicles([]));
+    if(user?.role!=="motorista"){
+      api.get("/drivers").then((r) => setDrivers(r.data)).catch(() => setDrivers([]));
+      api.get("/vehicles").then((r) => setVehicles(r.data)).catch(() => setVehicles([]));
+    }
+    api.get("/carriers").then((r) => setCarriers(r.data)).catch(() => setCarriers([]));
     api.get("/failure-reasons", { params: { only_active: true } }).then((r) => setReasons(r.data)).catch(() => setReasons([]));
   }, []);
 
   // Mantém a lista de rotas atualizada sem depender de F5,
   // já que outros utilizadores podem alterar o status em tempo real.
   usePolling(reload, REFRESH_INTERVAL_MS);
+
+  useEffect(() => {
+    const refreshAfterSync = () => { void reload(); };
+    window.addEventListener("adimax-offline-synced", refreshAfterSync);
+    return () => window.removeEventListener("adimax-offline-synced", refreshAfterSync);
+  }, []);
 
   useEffect(() => {
     if (!routes.length) return;
@@ -212,8 +251,8 @@ export default function RoutesPage() {
       }
     }
     try {
-      await api.post(`/routes/${id}/${path}`);
-      reload();
+      const response = await api.post(`/routes/${id}/${path}`);
+      if (response.status === 202) applyOfflineRouteAction(id, path); else reload();
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? t("route.action_error"));
     }
@@ -222,8 +261,8 @@ export default function RoutesPage() {
   async function checkinStop(routeId: number, stop: Stop) {
     setError("");
     try {
-      await api.post(`/routes/${routeId}/stops/${stop.id}/checkin`, {});
-      reload();
+      const response = await api.post(`/routes/${routeId}/stops/${stop.id}/checkin`, {});
+      if (response.status === 202) applyOfflineStopAction(routeId, stop.id, "em_rota"); else reload();
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? t("route.action_error"));
     }
@@ -238,8 +277,8 @@ export default function RoutesPage() {
       return;
     }
     try {
-      await api.post(`/routes/${routeId}/stops/${stop.id}/deliver`, { success: true });
-      reload();
+      const response = await api.post(`/routes/${routeId}/stops/${stop.id}/deliver`, { success: true });
+      if (response.status === 202) applyOfflineStopAction(routeId, stop.id, "entregue"); else reload();
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? t("route.action_error"));
     }
@@ -260,7 +299,8 @@ export default function RoutesPage() {
     try {
       const endpoint=isStopClosed(proofStop.stop)?"replacement-proof":"deliver-with-proof";
       const response=await api.post<RouteItem>(`/routes/${proofStop.routeId}/stops/${proofStop.stop.id}/${endpoint}`, payload);
-      setRoutes(current=>current.map(route=>route.id===response.data.id?response.data:route));
+      if (response.status === 202) applyOfflineStopAction(proofStop.routeId, proofStop.stop.id, "entregue");
+      else setRoutes(current=>current.map(route=>route.id===response.data.id?response.data:route));
       setProofStop(null);
       setProofFile(null);
     } catch (err: any) {
@@ -300,7 +340,8 @@ export default function RoutesPage() {
     if (failForm.returned_quantity) payload.set("returned_quantity", failForm.returned_quantity);
     if (failForm.notes.trim()) payload.set("notes", failForm.notes.trim());
     try {
-      await api.post(`/routes/${failStop.routeId}/stops/${failStop.stop.id}/deliver-with-proof`, payload);
+      const response = await api.post(`/routes/${failStop.routeId}/stops/${failStop.stop.id}/deliver-with-proof`, payload);
+      if (response.status === 202) applyOfflineStopAction(failStop.routeId, failStop.stop.id, "falha");
       setFailStop(null);
       setFailFile(null);
       reload();
@@ -427,6 +468,7 @@ export default function RoutesPage() {
 
   const driverName = (id?: number | null) => drivers.find((d) => d.id === id)?.name ?? "-";
   const vehiclePlate = (id?: number | null) => vehicles.find((v) => v.id === id)?.plate ?? "-";
+  const carrierName = (id?: number | null) => carriers.find((carrier) => carrier.id === id)?.name ?? "A definir";
   const selectedRoute = useMemo(
     () => routes.find((r) => r.id === selectedRouteId) ?? null,
     [routes, selectedRouteId],
@@ -443,9 +485,9 @@ export default function RoutesPage() {
     const r = reasons.find((r) => r.id === id);
     return r ? localizedReasonLabel(r) : "-";
   };
-  const canEdit = hasRole("admin_global", "gestor_brasil", "operador_logistico");
+  const canEdit = !user?.is_carrier_master && hasRole("admin_global", "gestor_brasil", "operador_logistico");
   const canPlanRoute = (route: RouteItem) => hasRole("admin_global") || (route.status === "planejada" && route.route_date >= new Date().toISOString().slice(0, 10));
-  const canUseManagementView = hasRole("admin_global", "gestor_brasil", "operador_logistico");
+  const canUseManagementView = !user?.is_carrier_master && hasRole("admin_global", "gestor_brasil", "operador_logistico");
 
   useEffect(() => {
     if (!canUseManagementView && routeView !== "map") setRouteView("map");
@@ -484,9 +526,9 @@ export default function RoutesPage() {
     if (assignmentDate && route.route_date !== assignmentDate) return false;
     const query = assignmentSearch.trim().toLocaleLowerCase("pt-BR");
     if (!query) return true;
-    return [route.codigo_ut, route.origin_name, route.fieldeas_description, routeCustomers(route), driverName(route.driver_id), vehiclePlate(route.vehicle_id)]
+    return [route.codigo_ut, route.origin_name, route.fieldeas_description, routeCustomers(route), carrierName(route.carrier_id), driverName(route.driver_id), vehiclePlate(route.vehicle_id)]
       .some((value) => String(value ?? "").toLocaleLowerCase("pt-BR").includes(query));
-  }), [visibleRoutes, assignmentDate, assignmentSearch, drivers, vehicles]);
+  }), [visibleRoutes, assignmentDate, assignmentSearch, carriers, drivers, vehicles]);
   const assignedRoutes = assignmentRoutes.filter((route) => route.driver_id && route.vehicle_id).length;
 
   return (
@@ -618,7 +660,7 @@ export default function RoutesPage() {
               </div>
             </div>
             <label><span>Data programada</span><input className="input" type="date" value={assignmentDate} onChange={(e) => setAssignmentDate(e.target.value)} /></label>
-            <label className="assignment-search"><span>Buscar</span><input className="input" placeholder="Rota, cliente, motorista ou veículo" value={assignmentSearch} onChange={(e) => setAssignmentSearch(e.target.value)} /></label>
+            <label className="assignment-search"><span>Buscar</span><input className="input" placeholder="Rota, cliente, transportadora, motorista ou veículo" value={assignmentSearch} onChange={(e) => setAssignmentSearch(e.target.value)} /></label>
           </div>
           <div className="assignment-summary">
             <div><strong>{assignmentRoutes.length}</strong><span>Rotas listadas</span></div>
@@ -630,13 +672,14 @@ export default function RoutesPage() {
             <div className="assignment-table-head"><div><strong>Lista de rotas</strong><span>{assignmentRoutes.length} resultado(s)</span></div></div>
             <div className="table-wrap">
               <table className="data-table assignment-table">
-                <thead><tr><th>Rota</th><th>Cliente / origem</th><th>Data</th><th>Motorista</th><th>Veículo</th><th>Andamento</th><th>Entregas</th><th>Ações</th></tr></thead>
+                <thead><tr><th>Rota</th><th>Cliente / origem</th><th>Data</th><th>Transportadora</th><th>Motorista</th><th>Veículo</th><th>Andamento</th><th>Entregas</th><th>Ações</th></tr></thead>
                 <tbody>
                   {assignmentRoutes.map((route) => (
                     <tr key={route.id}>
                       <td><button className="route-code" onClick={() => navigate(`/routes/${route.id}`)}>{route.codigo_ut}</button></td>
                       <td><strong>{routeCustomers(route)}</strong><small>{route.origin_name ?? "Origem não informada"}</small></td>
                       <td>{formatDate(route.route_date)}</td>
+                      <td className={!route.carrier_id ? "assignment-pending" : ""}>{carrierName(route.carrier_id)}</td>
                       <td className={!route.driver_id ? "assignment-pending" : ""}>{route.driver_id ? driverName(route.driver_id) : "A definir"}</td>
                       <td className={!route.vehicle_id ? "assignment-pending" : ""}>{route.vehicle_id ? vehiclePlate(route.vehicle_id) : "A definir"}</td>
                       <td><span className="status-pill" style={{ background: STATUS_COLOR[route.status] ?? "#667085" }}>{t(`route_status.${route.status}`, { defaultValue: route.status })}</span></td>
@@ -644,7 +687,7 @@ export default function RoutesPage() {
                       <td><div className="assignment-actions"><button className="btn-mini" onClick={() => { setSelectedRouteId(route.id); setRouteView("map"); }}>Ver rota</button>{canPlanRoute(route) && <button className="btn-mini assignment-scale" onClick={() => startAssignment(route)}><AssignmentIcon /> Escalar</button>}</div></td>
                     </tr>
                   ))}
-                  {!assignmentRoutes.length && <tr><td colSpan={8} className="empty-state">Nenhuma rota encontrada para os filtros selecionados.</td></tr>}
+                  {!assignmentRoutes.length && <tr><td colSpan={9} className="empty-state">Nenhuma rota encontrada para os filtros selecionados.</td></tr>}
                 </tbody>
               </table>
             </div>

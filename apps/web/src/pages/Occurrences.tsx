@@ -32,12 +32,13 @@ export default function Occurrences() {
   const [categoryManagerOpen,setCategoryManagerOpen] = useState(false);
   const [evidenceFile,setEvidenceFile] = useState<File|null>(null);
   const manager = hasRole("admin_global","gestor_brasil","torre_controle","operador_logistico");
+  const canManageCategories = manager && !user?.is_carrier_master;
   const canReport = hasRole("admin_global","gestor_brasil","torre_controle","motorista");
 
   const loadCategories = useCallback(async () => {
-    const response = await api.get<OccurrenceCategory[]>("/erp/occurrence-categories", { params:{include_inactive:manager} });
+    const response = await api.get<OccurrenceCategory[]>("/erp/occurrence-categories", { params:{include_inactive:canManageCategories} });
     setCategories(response.data);
-  },[manager]);
+  },[canManageCategories]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -130,7 +131,7 @@ export default function Occurrences() {
 
   const categoryName=(code:string)=>categories.find(category=>category.code===code)?.name||labels[code]||code;
   return <div className="page-card">
-    <div className="page-header"><div><h2>Tarefas de ocorrências</h2><p className="page-subtitle">Registre, atribua, resolva e finalize ocorrências da operação com histórico completo.</p></div><div className="occurrence-actions">{manager&&<button className="btn-ghost" type="button" onClick={()=>setCategoryManagerOpen(true)}>Gerenciar categorias</button>}{canReport&&<button className="btn-primary" type="button" onClick={openCreate}>Nova ocorrência</button>}</div></div>
+    <div className="page-header"><div><h2>Tarefas de ocorrências</h2><p className="page-subtitle">Registre, atribua, resolva e finalize ocorrências da operação com histórico completo.</p></div><div className="occurrence-actions">{canManageCategories&&<button className="btn-ghost" type="button" onClick={()=>setCategoryManagerOpen(true)}>Gerenciar categorias</button>}{canReport&&<button className="btn-primary" type="button" onClick={openCreate}>Nova ocorrência</button>}</div></div>
     <div className="occurrence-summary"><article><span>Abertas</span><strong>{rows.filter(r=>r.status==="aberta").length}</strong></article><article><span>Em tratamento</span><strong>{rows.filter(r=>["em_analise","em_tratamento"].includes(r.status)).length}</strong></article><article><span>Resolvidas</span><strong>{rows.filter(r=>r.status==="resolvida").length}</strong></article><article><span>Finalizadas</span><strong>{rows.filter(r=>r.status==="finalizada").length}</strong></article></div>
     <div className="occurrence-task-filter"><select className="input" value={statusFilter} onChange={event=>setStatusFilter(event.target.value)}><option value="pendentes">Tarefas pendentes</option><option value="todos">Todas as ocorrências</option><option value="aberta">Abertas</option><option value="em_tratamento">Em tratamento</option><option value="resolvida">Resolvidas</option><option value="finalizada">Finalizadas</option><option value="cancelada">Canceladas</option></select></div>
     <div className="table-scroll"><table className="data-table">

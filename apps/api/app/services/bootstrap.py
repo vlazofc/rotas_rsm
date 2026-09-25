@@ -36,7 +36,16 @@ def _add_missing_columns() -> None:
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_login ON users (login) WHERE login IS NOT NULL"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE"))
-        conn.execute(text("INSERT INTO driver_branches (driver_id, branch_id) SELECT id, branch_id FROM drivers ON CONFLICT (driver_id, branch_id) DO NOTHING"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS carrier_id INTEGER REFERENCES carriers(id)"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS carrier_assignment_status VARCHAR(30) NOT NULL DEFAULT 'pending_carrier'"))
+        conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS carrier_assignment_issue TEXT"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_routes_carrier_id ON routes (carrier_id)"))
+        conn.execute(text("ALTER TABLE driver_branches ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE"))
+        conn.execute(text("ALTER TABLE driver_branches ADD COLUMN IF NOT EXISTS approval_status VARCHAR(20) NOT NULL DEFAULT 'approved'"))
+        conn.execute(text("ALTER TABLE driver_branches ADD COLUMN IF NOT EXISTS approval_reason TEXT"))
+        conn.execute(text("ALTER TABLE driver_branches ADD COLUMN IF NOT EXISTS reviewed_by_id INTEGER REFERENCES users(id)"))
+        conn.execute(text("ALTER TABLE driver_branches ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ"))
+        conn.execute(text("INSERT INTO driver_branches (driver_id, branch_id, active, approval_status) SELECT id, branch_id, TRUE, 'approved' FROM drivers ON CONFLICT (driver_id, branch_id) DO NOTHING"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_type VARCHAR(2) DEFAULT 'PJ'"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS trade_name VARCHAR(160)"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS state_registration VARCHAR(40)"))
@@ -151,6 +160,10 @@ def _add_missing_columns() -> None:
              WHERE app_name IS NULL OR app_name ILIKE ('%Trans ' || 'Adimax%')
         """))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS navigation_layout VARCHAR(20) DEFAULT 'sidebar'"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS acting_branch_id INTEGER REFERENCES branches(id)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS acting_carrier_id INTEGER REFERENCES carriers(id)"))
+        conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS max_carrier_masters INTEGER NOT NULL DEFAULT 3"))
+        conn.execute(text("ALTER TABLE carriers ADD COLUMN IF NOT EXISTS max_masters INTEGER"))
         conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS help_assistant_enabled BOOLEAN NOT NULL DEFAULT TRUE"))
         # Campos importados da Torre de Controle (planilha) — routes
         conn.execute(text("ALTER TABLE routes ADD COLUMN IF NOT EXISTS vehicle_requested VARCHAR(40)"))
@@ -291,6 +304,15 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS antt_number VARCHAR(40)"))
         conn.execute(text("ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS antt_expiry_date DATE"))
         conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS person_type VARCHAR(20) DEFAULT 'pessoa_fisica'"))
+        conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS carrier_id INTEGER REFERENCES carriers(id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vehicle_owners_carrier_id ON vehicle_owners(carrier_id)"))
+        conn.execute(text(
+            "UPDATE vehicle_owners owner SET carrier_id = inferred.carrier_id "
+            "FROM (SELECT owner_id, MIN(carrier_id) AS carrier_id FROM vehicles "
+            "WHERE owner_id IS NOT NULL AND carrier_id IS NOT NULL GROUP BY owner_id "
+            "HAVING COUNT(DISTINCT carrier_id) = 1) inferred "
+            "WHERE owner.id = inferred.owner_id AND owner.carrier_id IS NULL AND owner.is_tenant_company IS NOT TRUE"
+        ))
         conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS bank_name VARCHAR(120)"))
         conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS bank_agency VARCHAR(30)"))
         conn.execute(text("ALTER TABLE vehicle_owners ADD COLUMN IF NOT EXISTS bank_account VARCHAR(40)"))
@@ -419,6 +441,7 @@ DEFAULT_CHECKLIST_ITEMS = [
 ]
 
 _INIT_DB_LOCK_KEY = 727384910  # chave arbitrária para o advisory lock abaixo.
+_BOOTSTRAP_VERSION = "2026-09-20.access-model-v3"
 
 
 def init_db() -> None:
@@ -429,7 +452,21 @@ def init_db() -> None:
     with engine.connect() as lock_conn:
         lock_conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _INIT_DB_LOCK_KEY})
         try:
-            _init_db_locked()
+            lock_conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS app_bootstrap_versions ("
+                "version VARCHAR(120) PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            ))
+            already_applied = lock_conn.scalar(
+                text("SELECT 1 FROM app_bootstrap_versions WHERE version = :version"),
+                {"version": _BOOTSTRAP_VERSION},
+            )
+            if already_applied is None:
+                _init_db_locked()
+                lock_conn.execute(
+                    text("INSERT INTO app_bootstrap_versions (version) VALUES (:version) ON CONFLICT DO NOTHING"),
+                    {"version": _BOOTSTRAP_VERSION},
+                )
+                lock_conn.commit()
         finally:
             lock_conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _INIT_DB_LOCK_KEY})
 
@@ -456,6 +493,21 @@ def _init_db_locked() -> None:
                 if profile.label == role.value:
                     profile.label = config["label"]
                 profile.system = True
+
+        # Perfis antigos eram aliases com autoridade implícita. Consolida as
+        # contas existentes nos perfis canônicos e mantém os registros antigos
+        # inativos apenas para rastreabilidade histórica.
+        legacy_roles = {
+            "admin_site": "gestor_brasil", "gerente": "gestor_brasil",
+            "lider": "operador_logistico", "planejamento": "operador_logistico",
+            "monitoramento": "torre_controle",
+        }
+        for legacy, canonical in legacy_roles.items():
+            db.execute(text("UPDATE users SET role=:canonical WHERE role=:legacy"), {"legacy": legacy, "canonical": canonical})
+            legacy_profile = db.get(RoleProfile, legacy)
+            if legacy_profile is not None:
+                legacy_profile.active = False
+                legacy_profile.description = f"Perfil legado consolidado em {canonical}."
 
         # Garante que receitas históricas/importadas também apareçam em Contas a Receber.
         linked_revenue_ids = select(FinancialAccount.revenue_id).where(FinancialAccount.revenue_id.is_not(None))
@@ -520,14 +572,14 @@ def _init_db_locked() -> None:
 
         branch = db.scalar(select(Branch).where(Branch.country == "PT"))
         if branch is not None:
-            branch.name = "Admmendes Distribuição - Brasil (Santo André)"
+            branch.name = "Salto"
             branch.country, branch.locale = "BR", "pt-BR"
             logger.info("Filial Portugal migrada para Brasil.")
         else:
-            branch = db.scalar(select(Branch).where(Branch.country == "BR"))
+            branch = db.scalar(select(Branch).where(Branch.name == "Salto"))
         if branch is None:
             branch = Branch(
-                name="Admmendes Distribuição - Brasil (Santo André)", country="BR", locale="pt-BR", tenant_id=tenant.id,
+                name="Salto", country="BR", locale="pt-BR", tenant_id=tenant.id,
             )
             db.add(branch)
             db.flush()

@@ -2,6 +2,7 @@ import {useEffect,useMemo,useRef,useState} from "react";
 import api from "../services/api";
 import {useAuth} from "../context/AuthContext";
 import RouteMap from "../components/RouteMap";
+import {usePolling} from "../hooks/usePolling";
 
 type Live={route_id:number;codigo_ut:string;vehicle_plate?:string;driver_name?:string;latitude:number;longitude:number;speed_kmh?:number;recorded_at:string};
 type DriverRoute={id:number;codigo_ut:string;status:string};
@@ -12,7 +13,8 @@ export default function Tracking(){
  const [live,setLive]=useState<Live[]>([]),[activeRoute,setActiveRoute]=useState<DriverRoute|null>(null),[selected,setSelected]=useState<number|null>(null),[fullscreen,setFullscreen]=useState(false),[checking,setChecking]=useState(true);
  const mapShell=useRef<HTMLDivElement|null>(null);
  async function refresh(){if(tower)setLive((await api.get('/tracking/live')).data);else{const {data}=await api.get<DriverRoute[]>('/routes');setActiveRoute(data.find(item=>item.status==='em_rota')??null);setChecking(false)}}
- useEffect(()=>{void refresh();const timer=window.setInterval(()=>void refresh(),30000);return()=>window.clearInterval(timer)},[tower]);
+ useEffect(()=>{void refresh()},[tower]);
+ usePolling(refresh,30000);
  useEffect(()=>{const change=()=>setFullscreen(document.fullscreenElement===mapShell.current);document.addEventListener('fullscreenchange',change);return()=>document.removeEventListener('fullscreenchange',change)},[]);
  async function toggleFullscreen(){if(!document.fullscreenElement)await mapShell.current?.requestFullscreen();else await document.exitFullscreen()}
  const mapRoutes=useMemo(()=>live.map(p=>({id:p.route_id,codigo_ut:p.codigo_ut,status:'em_rota',stops:[{id:p.route_id,customer_name:p.driver_name||'Motorista',vehicle_plate:p.vehicle_plate,latitude:p.latitude,longitude:p.longitude,status:'em_rota'}]})),[live]);

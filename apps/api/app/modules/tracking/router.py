@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import Role, require_branch_access, require_feature, require_roles, scope_by_branch
-from app.db.models import AppPermissionConsent, Driver, ProviderVehiclePosition, Route, TrackingConsent, User, Vehicle, VehiclePosition
+from app.db.models import AppPermissionConsent, CarrierUser, Driver, ProviderVehiclePosition, Route, TrackingConsent, User, Vehicle, VehiclePosition
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 
@@ -95,6 +95,7 @@ def record_position(data: PositionIn, db: Session = Depends(get_db), user: User 
 
 @router.get("/live", dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.TORRE_CONTROLE))])
 def live_positions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
     latest = select(VehiclePosition.route_id, func.max(VehiclePosition.recorded_at).label("latest")).group_by(VehiclePosition.route_id).subquery()
     stmt = (select(VehiclePosition, Route.codigo_ut, Vehicle.plate, Driver.name)
             .join(latest, (latest.c.route_id == VehiclePosition.route_id) & (latest.c.latest == VehiclePosition.recorded_at))
@@ -103,6 +104,7 @@ def live_positions(db: Session = Depends(get_db), user: User = Depends(get_curre
             .outerjoin(Driver, Driver.id == VehiclePosition.driver_id)
             .where(Route.status.not_in(CLOSED_STATES)))
     stmt = scope_by_branch(stmt, VehiclePosition.branch_id, user, db)
+    if membership is not None: stmt = stmt.where(Route.carrier_id == membership.carrier_id)
     result = [{"route_id": p.route_id, "codigo_ut": code, "vehicle_plate": plate, "driver_name": name,
              "latitude": p.latitude, "longitude": p.longitude, "accuracy_m": p.accuracy_m,
              "speed_kmh": p.speed_kmh, "recorded_at": p.recorded_at, "source": "app"} for p, code, plate, name in db.execute(stmt).all()]
@@ -116,6 +118,7 @@ def live_positions(db: Session = Depends(get_db), user: User = Depends(get_curre
                      .outerjoin(Driver, Driver.id == Route.driver_id)
                      .where(Route.status.not_in(CLOSED_STATES)))
     provider_stmt = scope_by_branch(provider_stmt, ProviderVehiclePosition.branch_id, user, db)
+    if membership is not None: provider_stmt = provider_stmt.where(Route.carrier_id == membership.carrier_id)
     provider_rows = [{"route_id": p.route_id, "codigo_ut": code, "vehicle_plate": plate, "driver_name": name,
                       "latitude": p.latitude, "longitude": p.longitude, "accuracy_m": None,
                       "speed_kmh": p.speed_kmh, "recorded_at": p.recorded_at, "source": "truckcontrol"}

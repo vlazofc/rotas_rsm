@@ -3,6 +3,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.core.security import create_access_token, decode_token
 from app.core.permissions import AccessScope, has_all_environment_access, operational_scope, require_branch_access, require_same_branch
 from app.db.models import Branch
 
@@ -45,6 +46,12 @@ def test_global_admin_can_cross_branches():
     require_same_branch(user, 11)
 
 
+def test_global_admin_acting_as_branch_loses_global_bypass():
+    user = type("UserStub", (), {"role": "admin_global", "branch_id": 10, "acting_branch_id": 10, "acting_carrier_id": None, "permissions_json": None})()
+    assert has_all_environment_access(user) is False
+    assert operational_scope(user) == AccessScope.BRANCH
+
+
 def test_adimax_tenant_name_does_not_grant_global_access():
     tenant = type("TenantStub", (), {"slug": "adimax"})()
     user = type("UserStub", (), {"role": "gerente", "tenant": tenant, "permissions_json": None})()
@@ -77,3 +84,9 @@ def test_tenant_manager_can_access_another_branch_but_operator_cannot():
     with pytest.raises(HTTPException) as exc:
         require_branch_access(FakeDb(), operator, branch.id)
     assert exc.value.status_code == 403
+
+
+def test_each_login_receives_a_distinct_session_identifier():
+    first = decode_token(create_access_token("123"))
+    second = decode_token(create_access_token("123"))
+    assert first["jti"] != second["jti"]

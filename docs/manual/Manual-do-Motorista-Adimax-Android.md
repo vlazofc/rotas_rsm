@@ -1,7 +1,7 @@
 # Manual do Motorista — Aplicativo Adimax Android
 
 **Tela de login, rotas e ocorrências**  
-Versão do manual: 1.1 — 15/09/2026
+Versão do manual: 1.2 — 18/09/2026
 
 ## 1. Tela de login
 
@@ -190,7 +190,32 @@ As situações seguem normalmente:
 
 A ocorrência também pode ser cancelada quando registrada por engano ou quando deixar de ser aplicável. O histórico pode mostrar data, etapa, responsável, solução e observações da equipe.
 
-## 4. Resumo rápido
+## 4. Trabalhar sem internet
+
+O aplicativo permite continuar a rota quando o sinal de internet desaparecer. Um aviso no alto da tela mostra **Trabalhando sem internet** e a quantidade de ações que aguardam sincronização.
+
+Podem ficar guardados no aparelho:
+
+- chegada e liberação do CD;
+- check-in de parada;
+- entrega ou recusa;
+- fotos, PDFs e comprovantes;
+- comprovante de devolução no CD;
+- posição de rastreamento.
+
+### Passo a passo
+
+1. Continue usando os botões normalmente.
+2. Confira se a tela avançou para a próxima etapa.
+3. Mantenha o aplicativo instalado e não limpe seus dados.
+4. Quando houver rede, deixe o aplicativo aberto por alguns instantes.
+5. Aguarde o contador chegar a zero; o sistema atualizará a rota automaticamente.
+
+As ações são enviadas na ordem em que foram feitas e possuem proteção contra duplicidade. Fechar o aplicativo ou reiniciar o aparelho não apaga a fila. Porém, sair da conta, limpar os dados ou desinstalar o aplicativo pode impedir a recuperação local; evite essas ações até terminar a sincronização.
+
+Se o aviso indicar falha, toque nele para tentar novamente. Persistindo o problema, informe à operação o código da rota, a parada e a ação pendente.
+
+## 5. Resumo rápido
 
 ### Login
 

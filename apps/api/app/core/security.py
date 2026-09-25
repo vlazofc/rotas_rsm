@@ -1,5 +1,6 @@
 """Hash de senha e emissão/validação de JWT."""
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import jwt
 from jwt import PyJWTError
@@ -22,6 +23,9 @@ def _create_token(subject: str, claims: dict, expires_delta: timedelta) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": subject,
+        # Identifica cada sessão/token individualmente. Sem jti, dois logins do
+        # mesmo usuário no mesmo instante podem produzir JWTs idênticos.
+        "jti": str(uuid4()),
         "iat": now,
         "exp": now + expires_delta,
         **claims,
@@ -45,6 +49,11 @@ def create_refresh_token(subject: str, **claims) -> str:
 
 def decode_token(token: str) -> dict:
     try:
-        return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+        return jwt.decode(
+            token,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+            leeway=settings.jwt_clock_skew_seconds,
+        )
     except PyJWTError as exc:  # noqa: BLE001
         raise ValueError("Token inválido") from exc

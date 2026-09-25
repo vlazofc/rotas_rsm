@@ -12,9 +12,9 @@ from pydantic import BaseModel
 from sqlalchemy import extract, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.permissions import FINANCE_VIEW, Role, require_permission, require_roles, scope_by_branch
+from app.core.permissions import FINANCE_VIEW, Role, require_internal_permission, require_internal_roles, require_permission, require_roles, scope_by_branch
 from app.db.models import (
-    Attachment, AuditLog, DeliveryFailureReason, Driver, Expense, FinancialAccount, MaintenanceOrder,
+    Attachment, AuditLog, Carrier, DeliveryFailureReason, Driver, Expense, FinancialAccount, MaintenanceOrder,
     Part, Revenue, Route, RouteOccurrence, RouteStop, Tire, User, Vehicle, WorkflowTask,
 )
 from app.db.session import get_db
@@ -24,7 +24,7 @@ from app.services import storage
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
-@router.get("/overview", dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))])
+@router.get("/overview", dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR, Role.DIRETORIA))])
 def overview_report(start: date | None = None, end: date | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Resumo gerencial multiárea para a central de relatórios."""
     def branch(stmt, model):
@@ -65,6 +65,29 @@ def overview_report(start: date | None = None, end: date | None = None, db: Sess
         "control":{"occurrences_open":sum(1 for row in occurrences if row.status not in {"finalizada","resolvida"}),"tasks_open":sum(1 for row in tasks if row.status=="open"),"tasks_in_progress":sum(1 for row in tasks if row.status=="in_progress"),"tasks_returned":sum(1 for row in tasks if row.status=="returned")},
         "fleet":{"maintenance_open":sum(1 for row in maintenance if row.status in {"aberta","em_andamento"}),"maintenance_overdue":sum(1 for row in maintenance if row.status not in {"concluida","cancelada"} and row.expected_completion_date and row.expected_completion_date<today),"tires_total":len(tires),"tires_attention":sum(1 for row in tires if row.status!="descartado" and row.tread_depth_mm is not None and row.tread_depth_mm<=3),"parts_low":sum(1 for row in parts if row.quantity<=row.minimum_quantity),"stock_value":round(sum(float(row.quantity or 0)*float(row.average_cost or 0) for row in parts),2)},
     }
+
+
+@router.get("/route-payments", dependencies=[Depends(require_internal_permission("module.reports",
+    Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR, Role.DIRETORIA,
+))])
+def route_payments(start: date | None = None, end: date | None = None,
+                   db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Conciliação somente-leitura do valor de motorista registrado na rota."""
+    stmt = (
+        select(Route, Driver.name, Carrier.name)
+        .join(Driver, Driver.id == Route.driver_id, isouter=True)
+        .join(Carrier, Carrier.id == Route.carrier_id, isouter=True)
+        .where(Route.excluded.is_(False))
+        .order_by(Route.route_date.desc(), Route.id.desc())
+    )
+    stmt = scope_by_branch(stmt, Route.branch_id, user, db)
+    if start: stmt = stmt.where(Route.route_date >= start)
+    if end: stmt = stmt.where(Route.route_date <= end)
+    return [{
+        "route_id": route.id, "codigo_ut": route.codigo_ut, "route_date": route.route_date,
+        "status": route.status, "driver_name": driver_name, "carrier_name": carrier_name,
+        "driver_payment_amount": float(route.driver_payment_amount) if route.driver_payment_amount is not None else None,
+    } for route, driver_name, carrier_name in db.execute(stmt).all()]
 
 
 class ProofReportOut(BaseModel):
@@ -167,7 +190,7 @@ def _audit_rows(db: Session, start: date | None, end: date | None) -> list[tuple
 
 @router.get(
     "/routes.xlsx",
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
 )
 def export_routes_xlsx(
     start: date | None = None,
@@ -242,7 +265,7 @@ def export_routes_xlsx(
 
 @router.get(
     "/failures.xlsx",
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
 )
 def export_failures_xlsx(
     start: date | None = None,
@@ -303,7 +326,7 @@ def export_failures_xlsx(
 @router.get(
     "/proofs",
     response_model=list[ProofReportOut],
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
 )
 def list_proofs(
     start: date | None = None,
@@ -330,7 +353,7 @@ def list_proofs(
 
 @router.get(
     "/proofs.zip",
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
 )
 def download_proofs_zip(
     start: date | None = None,
@@ -360,7 +383,7 @@ def download_proofs_zip(
 @router.get(
     "/expenses",
     response_model=list[ExpenseReportOut],
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
 )
 def list_expense_report(
     start: date | None = None,
@@ -387,7 +410,7 @@ def list_expense_report(
 
 @router.get(
     "/expenses.xlsx",
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
 )
 def export_expenses_report_xlsx(
     start: date | None = None,
@@ -427,7 +450,7 @@ def export_expenses_report_xlsx(
 
 @router.get(
     "/expenses.zip",
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.GESTOR_FINANCEIRO, Role.AUDITOR))],
 )
 def download_expense_proofs_zip(
     start: date | None = None,
@@ -457,7 +480,7 @@ def download_expense_proofs_zip(
 @router.get(
     "/audit",
     response_model=list[AuditReportOut],
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
 )
 def list_audit_report(
     start: date | None = None,
@@ -483,7 +506,7 @@ def list_audit_report(
 
 @router.get(
     "/audit.xlsx",
-    dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
+    dependencies=[Depends(require_internal_permission("module.reports", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.AUDITOR))],
 )
 def export_audit_report_xlsx(
     start: date | None = None,

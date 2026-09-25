@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.db.models import Branch, Route, RouteStop
 from app.db.session import SessionLocal
 from app.services.import_changes import authorize_changes, collect_changes, snapshot_import
+from app.services.route_carrier import apply_import_carrier, resolve_import_carrier
 
 
 def _text(value) -> str | None:
@@ -73,7 +74,7 @@ def _rows(sheet) -> list[dict]:
     return [dict(zip(headers, row)) for row in iterator if any(value not in (None, "") for value in row)]
 
 
-def build_jm_template_xlsx() -> io.BytesIO:
+def build_jm_template_xlsx(carriers: list[tuple[int, str]] | None = None) -> io.BytesIO:
     """Gera o modelo no mesmo formato da carga operacional enviada pela JM."""
     workbook = openpyxl.Workbook()
     detail = workbook.active
@@ -81,7 +82,7 @@ def build_jm_template_xlsx() -> io.BytesIO:
     detail.append([
         "Sequência", "Nº Carga", "Número pedido", "NF", "Razão Social / Nome",
         "Logradouro", "Número", "Bairro", "Cidade", "UF", "PESO BRUTO",
-        "Observação de Entrega", "Observação Representante",
+        "ID Transportadora", "Transportadora", "Observação de Entrega", "Observação Representante",
     ])
     fiscal = workbook.create_sheet("Notas e datas")
     fiscal.append([
@@ -93,6 +94,7 @@ def build_jm_template_xlsx() -> io.BytesIO:
     instructions.append(["ORIENTAÇÃO", "DETALHE"])
     instructions.append(["Nome das abas", "Pode ser alterado; a identificação é feita pelas colunas."])
     instructions.append(["Número do pedido", "Também pode ser informado como Número ou Número pedido."])
+    instructions.append(["Transportadora", "Preencha o ID e o nome exatamente como aparecem na aba Transportadoras. O ID define o acesso à rota."])
     instructions.append(["Detalhes da carga", "Uma linha por entrega. Sequência, Nº Carga e pedido são obrigatórios."])
     instructions.append(["Notas e datas", "Use o mesmo pedido da primeira aba para atualizar NF e datas, inclusive retroativamente."])
     for sheet in (detail, fiscal, instructions):
@@ -104,6 +106,13 @@ def build_jm_template_xlsx() -> io.BytesIO:
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
     instructions.column_dimensions["B"].width = 95
+    reference = workbook.create_sheet("Transportadoras")
+    reference.append(["ID TRANSPORTADORA", "TRANSPORTADORA"])
+    for carrier_id, carrier_name in carriers or []:
+        reference.append([carrier_id, carrier_name])
+    for cell in reference[1]:
+        cell.font = Font(bold=True); cell.fill = PatternFill("solid", fgColor="F9A61A")
+    reference.column_dimensions["A"].width = 22; reference.column_dimensions["B"].width = 42
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)
@@ -137,7 +146,7 @@ def import_jm_loads(source, branch_id: int, *, confirmed: bool = False, user_id:
     }
     stats = {"rows_read": len(detail_rows), "routes_created": 0, "routes_updated": 0,
              "stops_created": 0, "stops_updated": 0, "routes_optimized": 0,
-             "routing_errors": 0, "route_ids": [], "errors": []}
+             "routing_errors": 0, "carrier_pending": 0, "route_ids": [], "errors": []}
     groups: dict[str, list[dict]] = {}
     for index, row in enumerate(detail_rows, 2):
         load = _text(row.get("Nº CARGA"))
@@ -167,6 +176,15 @@ def import_jm_loads(source, branch_id: int, *, confirmed: bool = False, user_id:
                 route.route_date = planned_date
                 route.delivery_date = planned_date
             collect_changes(changes, before_route, route, load)
+            carrier, carrier_issue = resolve_import_carrier(
+                db, branch_id,
+                carrier_id=int(_number(rows[0].get("ID TRANSPORTADORA"))) if _number(rows[0].get("ID TRANSPORTADORA")) is not None else None,
+                name=_text(rows[0].get("TRANSPORTADORA")),
+            )
+            apply_import_carrier(route, carrier, carrier_issue)
+            if carrier_issue:
+                stats["carrier_pending"] += 1
+                stats["errors"].append(f"Rota {load}: {carrier_issue}")
             db.flush()
             stats["route_ids"].append(route.id)
             stats["routes_created" if is_new_route else "routes_updated"] += 1

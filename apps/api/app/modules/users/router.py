@@ -7,9 +7,9 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_roles, require_same_tenant
+from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_permission, require_roles, require_same_tenant
 from app.core.security import hash_password
-from app.db.models import Branch, Driver, RoleProfile, User
+from app.db.models import Branch, Carrier, CarrierBranch, CarrierUser, Driver, RoleProfile, User
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
@@ -17,7 +17,26 @@ from app.services.entity_status import StatusChangeIn, apply_status
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-_ADMIN_OR_MANAGER = require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)
+_ADMIN_OR_MANAGER = require_permission("module.users", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL)
+_CARRIER_ASSIGNABLE_ROLES = {
+    Role.ADMIN_SITE.value, Role.GERENTE.value, Role.LIDER.value,
+    Role.PLANEJAMENTO.value, Role.MONITORAMENTO.value,
+    Role.OPERADOR_LOGISTICO.value, Role.TORRE_CONTROLE.value,
+    Role.MOTORISTA.value,
+}
+
+def _guard_carrier_user(db: Session, actor: User, target_user_id: int) -> None:
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    if membership is not None and db.scalar(select(CarrierUser).where(CarrierUser.user_id == target_user_id, CarrierUser.carrier_id == membership.carrier_id, CarrierUser.active.is_(True))) is None:
+        raise HTTPException(403, "Usuário não pertence à sua transportadora.")
+
+def _guard_carrier_assignment(membership: CarrierUser | None, role: str | None, permissions: list[str] | None) -> None:
+    if membership is None:
+        return
+    if role is not None and role not in _CARRIER_ASSIGNABLE_ROLES:
+        raise HTTPException(403, "Este perfil só pode ser atribuído pela administração Adimax.")
+    if permissions:
+        raise HTTPException(403, "Permissões individuais só podem ser atribuídas pela administração Adimax.")
 
 
 class UserIn(BaseModel):
@@ -85,6 +104,8 @@ class UserOut(BaseModel):
     department: str | None = None
     subgroup: str | None = None
     permissions: list[str] = Field(default_factory=list)
+    carrier_id: int | None = None
+    carrier_name: str | None = None
 
     class Config:
         from_attributes = True
@@ -94,12 +115,12 @@ class UserCredentialsOut(UserOut):
     initial_password: str
 
 
-def _user_out(user: User) -> UserOut:
+def _user_out(user: User, carrier_id: int | None = None, carrier_name: str | None = None) -> UserOut:
     return UserOut(
         id=user.id, email=user.email, login=user.login, name=user.name, role=user.role,
         branch_id=user.branch_id, tenant_id=user.tenant_id, active=user.active, blocked=user.blocked, status_reason=user.status_reason,
         department=user.department, subgroup=user.subgroup, must_change_password=user.must_change_password,
-        permissions=_parse_permissions(user.permissions_json),
+        permissions=_parse_permissions(user.permissions_json), carrier_id=carrier_id, carrier_name=carrier_name,
     )
 
 
@@ -156,13 +177,16 @@ def _guard_admin_assignment(actor: User, target_role: str | None) -> None:
 
 
 @router.get("/roles", dependencies=[Depends(_ADMIN_OR_MANAGER)])
-def list_roles(db: Session = Depends(get_db)):
+def list_roles(db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     """Perfis ativos para selects no frontend."""
     rows = db.scalars(
         select(RoleProfile)
         .where(RoleProfile.active.is_(True))
         .order_by(RoleProfile.sort_order, RoleProfile.label)
     ).all()
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    if membership is not None:
+        rows = [row for row in rows if row.value in _CARRIER_ASSIGNABLE_ROLES]
     return [_role_out(row).model_dump() for row in rows]
 
 
@@ -247,10 +271,21 @@ def delete_role_profile(value: str, db: Session = Depends(get_db), actor: User =
 def list_users(db: Session = Depends(get_db), actor: User = Depends(get_current_user)):
     # Contas técnicas de simulação ("Simular ambiente") não são usuários reais.
     stmt = select(User).order_by(User.name)
-    if not has_all_environment_access(actor):
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    if membership is not None:
+        stmt = stmt.join(CarrierUser, CarrierUser.user_id == User.id).where(CarrierUser.carrier_id == membership.carrier_id, CarrierUser.active.is_(True))
+    elif not has_all_environment_access(actor):
         stmt = stmt.where(User.tenant_id == actor.tenant_id)
     rows = db.scalars(stmt).all()
-    return [_user_out(row) for row in rows if not (
+    memberships = {
+        user_id: (carrier_id, carrier_name)
+        for user_id, carrier_id, carrier_name in db.execute(
+            select(CarrierUser.user_id, Carrier.id, Carrier.name)
+            .join(Carrier, Carrier.id == CarrierUser.carrier_id)
+            .where(CarrierUser.active.is_(True), CarrierUser.user_id.in_([row.id for row in rows]))
+        ).all()
+    } if rows else {}
+    return [_user_out(row, *(memberships.get(row.id, (None, None)))) for row in rows if not (
         row.email.startswith("preview@")
         and row.email.endswith((".admmendes.internal", ".jm.internal"))
     )]
@@ -271,7 +306,14 @@ def create_user(data: UserIn, response: Response, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail="Email já cadastrado.")
     if login and db.scalar(select(User).where(User.login == login)):
         raise HTTPException(status_code=409, detail="Nome de usuário já cadastrado.")
+    actor_membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    _guard_carrier_assignment(actor_membership, data.role, data.permissions)
     branch = require_branch_access(db, actor, data.branch_id) if data.branch_id is not None else None
+    if actor_membership is not None:
+        if branch is None or db.scalar(select(CarrierBranch).where(CarrierBranch.carrier_id == actor_membership.carrier_id, CarrierBranch.branch_id == branch.id, CarrierBranch.active.is_(True))) is None:
+            raise HTTPException(403, "Selecione uma filial habilitada para a transportadora.")
+        if data.role == Role.ADMIN_GLOBAL.value:
+            raise HTTPException(403, "O Master não pode criar administradores globais.")
     tenant_id = branch.tenant_id if branch else actor.tenant_id
     if tenant_id is None and data.role != Role.ADMIN_GLOBAL.value:
         raise HTTPException(status_code=422, detail="Empresa não identificada para o usuário.")
@@ -290,6 +332,8 @@ def create_user(data: UserIn, response: Response, db: Session = Depends(get_db),
     )
     db.add(user)
     db.flush()
+    if actor_membership is not None:
+        db.add(CarrierUser(carrier_id=actor_membership.carrier_id, user_id=user.id, active=True))
     log(db, user_id=actor.id, action="create", entity="user", entity_id=user.id)
     db.commit()
     db.refresh(user)
@@ -302,9 +346,12 @@ def update_user(user_id: int, data: UserUpdate,
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    _guard_carrier_user(db, actor, user.id)
     require_same_tenant(actor, user.tenant_id)
     _guard_admin_assignment(actor, user.role)
     updates = data.model_dump(exclude_unset=True)
+    actor_membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
+    _guard_carrier_assignment(actor_membership, data.role, data.permissions)
     if "login" in updates:
         login = _normalize_login(data.login)
         if user.role == Role.MOTORISTA.value and not login:
@@ -348,6 +395,12 @@ def update_user(user_id: int, data: UserUpdate,
         user.permissions_json = _permissions_text(data.permissions)
     if "branch_id" in updates:
         branch = require_branch_access(db, actor, data.branch_id) if data.branch_id is not None else None
+        if actor_membership is not None and (branch is None or db.scalar(select(CarrierBranch).where(
+            CarrierBranch.carrier_id == actor_membership.carrier_id,
+            CarrierBranch.branch_id == branch.id,
+            CarrierBranch.active.is_(True),
+        )) is None):
+            raise HTTPException(403, "Selecione uma filial habilitada para a transportadora.")
         user.branch_id = branch.id if branch else None
         if branch:
             user.tenant_id = branch.tenant_id
@@ -365,6 +418,7 @@ def update_user(user_id: int, data: UserUpdate,
 def change_user_status(user_id:int,data:StatusChangeIn,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     user=db.get(User,user_id)
     if user is None:raise HTTPException(404,"Usuário não encontrado.")
+    _guard_carrier_user(db,actor,user.id)
     require_same_tenant(actor,user.tenant_id)
     if user.id==actor.id and data.action in {"deactivate","block"}:raise HTTPException(400,"Não é possível bloquear ou desativar a própria conta.")
     if user.role==Role.ADMIN_GLOBAL.value and actor.role!=Role.ADMIN_GLOBAL.value:raise HTTPException(403,"Sem permissão para alterar um admin global.")
@@ -403,6 +457,7 @@ def reset_password(user_id: int, response: Response,
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    _guard_carrier_user(db, actor, user.id)
     require_same_tenant(actor, user.tenant_id)
     if user.role == Role.ADMIN_GLOBAL.value and actor.role != Role.ADMIN_GLOBAL.value:
         raise HTTPException(status_code=403, detail="Sem permissão para redefinir a senha de um admin global.")
