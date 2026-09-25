@@ -213,8 +213,9 @@ services:
       - internal
 
   minio-backup:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     container_name: rotas_minio_backup
+    profiles: ["maintenance"]
     restart: unless-stopped
     env_file:
       - ${APP_ENV_FILE:-.env}
