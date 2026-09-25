@@ -93,7 +93,7 @@ def record_position(data: PositionIn, db: Session = Depends(get_db), user: User 
     db.add(row); db.commit()
     return {"id": row.id, "recorded_at": row.recorded_at}
 
-@router.get("/live", dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.TORRE_CONTROLE))])
+@router.get("/live", dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.TORRE_CONTROLE, Role.AUDITOR))])
 def live_positions(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
     latest = select(VehiclePosition.route_id, func.max(VehiclePosition.recorded_at).label("latest")).group_by(VehiclePosition.route_id).subquery()

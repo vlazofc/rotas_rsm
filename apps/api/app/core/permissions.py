@@ -53,9 +53,13 @@ ROLE_CONFIG = {
         "label": "Auditor",
         "description": "Consulta histórico e relatórios sem editar",
         "permissions": [
-            "Consultar auditoria",
-            "Consultar histórico operacional",
-            "Visualizar relatórios",
+            "module.dashboard",
+            "module.routes",
+            "module.monitoring",
+            "module.occurrences",
+            "module.gallery",
+            "module.tracking",
+            "module.reports",
         ],
     },
     Role.DIRETORIA: {
