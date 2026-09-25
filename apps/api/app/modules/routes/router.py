@@ -448,7 +448,7 @@ def get_route(route_id: int, db: Session = Depends(get_db), user: User = Depends
 
 
 @router.post("", response_model=RouteOut,
-             dependencies=[Depends(require_internal_permission("module.routes", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
+             dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
 def create_route(data: RouteIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_branch_access(db, user, data.branch_id)
     _validate_route_carrier(db, data.branch_id, data.carrier_id)
@@ -467,7 +467,7 @@ def create_route(data: RouteIn, db: Session = Depends(get_db), user: User = Depe
 
 # ----------------------- Edição de rota e paradas -----------------------
 
-_EDITOR = Depends(require_internal_permission("module.routes", Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))
+_EDITOR = Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))
 
 
 def _guard_not_cancelled(route: Route) -> None:
