@@ -742,6 +742,12 @@ export default function RoutesPage() {
                         <span title={t("route.source_manual")} style={{ color: "#f59e0b", fontWeight: 800, fontSize: 15, lineHeight: 1 }}>*</span>
                       )}
                     </div>
+                    {canUseManagementView && (
+                      <div className="route-carrier-badge" title="Transportadora responsável pela rota">
+                        <span>Transportadora</span>
+                        <strong>{carrierName(r.carrier_id)}</strong>
+                      </div>
+                    )}
                     <div className="route-meta">{r.fieldeas_description ?? r.origin_name ?? t("route.no_origin")} · {r.route_date}</div>
                     <div className="route-meta">{driverName(r.driver_id)} · {vehiclePlate(r.vehicle_id)}</div>
                   </div>

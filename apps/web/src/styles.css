@@ -1289,6 +1289,23 @@ label { font-size: 13px; color: #334155; }
   font-size: 12px;
   margin-top: 3px;
 }
+.route-carrier-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 3px 7px;
+  border: 1px solid rgba(11,92,171,.2);
+  border-radius: 6px;
+  background: rgba(11,92,171,.07);
+  color: #0b5cab;
+  font-size: 10px;
+  line-height: 1.25;
+}
+.route-carrier-badge span { color: var(--muted); font-weight: 650; }
+.route-carrier-badge strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .route-actions {
   display: flex;
   flex-wrap: wrap;
