@@ -83,6 +83,7 @@ class Branch(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120))
     country: Mapped[str] = mapped_column(String(2), default="BR")
     locale: Mapped[str] = mapped_column(String(5), default="pt-BR")
+    default_origin_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     tenant: Mapped[Tenant | None] = relationship(back_populates="branches")

@@ -8,7 +8,7 @@ import httpx
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.logging import logger
-from app.db.models import OperationalSettings
+from app.db.models import Branch, OperationalSettings
 
 def routing_enabled(db: Session) -> bool:
     row = db.get(OperationalSettings, 1)
@@ -121,7 +121,6 @@ def route_through_stops(db: Session, route, *, optimize: bool = False) -> dict[s
         else: groups.append([stop])
     grouped_stops = [group[0] for group in groups]
     addresses = [_address(stop) for stop in grouped_stops]
-    actual_origin = route.origin_address or route.origin_name or settings.sharepoint_sync_origin_address
     if route.source == "automatico" and not route.origin_address:
         # Recupera a coluna V de cargas já importadas sem substituir o CD
         # pelo endereço da primeira entrega.
@@ -136,8 +135,12 @@ def route_through_stops(db: Session, route, *, optimize: bool = False) -> dict[s
                            if str(key).strip().upper() == 'ORIGEM' and value and str(value).strip()), None)
             if origin:
                 route.origin_address = origin
-                actual_origin = origin
                 break
+    if not route.origin_address:
+        branch = db.get(Branch, route.branch_id)
+        if branch and branch.default_origin_address:
+            route.origin_address = branch.default_origin_address
+    actual_origin = route.origin_address or route.origin_name or settings.sharepoint_sync_origin_address
     can_optimize = bool(actual_origin) and len(groups) > 1 and optimize
     if actual_origin:
         origin, destination, waypoint_addresses, mapped_groups, destination_group = actual_origin, addresses[-1], addresses[:-1], groups[:-1], groups[-1]
@@ -207,6 +210,10 @@ def route_through_stops(db: Session, route, *, optimize: bool = False) -> dict[s
 
 def optimize_route(db: Session, route, *, origin: str | None = None, apply: bool = False) -> dict:
     if origin: route.origin_address = origin
+    if not route.origin_address:
+        branch = db.get(Branch, route.branch_id)
+        if branch and branch.default_origin_address:
+            route.origin_address = branch.default_origin_address
     if not (route.origin_address or route.origin_name or settings.sharepoint_sync_origin_address):
         result = route_through_stops(db, route, optimize=False)
         # A base JM atual não possui origem. Ainda assim, os clientes devem ser

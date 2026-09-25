@@ -29,6 +29,7 @@ def _add_missing_columns() -> None:
                     "tenant_id INTEGER REFERENCES tenants(id)"
                 )
             )
+        conn.execute(text("ALTER TABLE branches ADD COLUMN IF NOT EXISTS default_origin_address VARCHAR(255)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS department VARCHAR(80)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS subgroup VARCHAR(80)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions_json TEXT"))
@@ -441,7 +442,7 @@ DEFAULT_CHECKLIST_ITEMS = [
 ]
 
 _INIT_DB_LOCK_KEY = 727384910  # chave arbitrária para o advisory lock abaixo.
-_BOOTSTRAP_VERSION = "2026-09-20.access-model-v3"
+_BOOTSTRAP_VERSION = "2026-09-25.branch-default-origin-v4"
 
 
 def init_db() -> None:

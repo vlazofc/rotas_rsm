@@ -16,12 +16,14 @@ class BranchIn(BaseModel):
     name: str
     country: str = "BR"
     locale: str = "pt-BR"
+    default_origin_address: str | None = None
     tenant_id: int | None = None
 
 
 class BranchUpdate(BaseModel):
     name: str | None = None
     locale: str | None = None
+    default_origin_address: str | None = None
     active: bool | None = None
 
 
