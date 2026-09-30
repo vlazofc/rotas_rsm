@@ -47,6 +47,7 @@ type RouteView = "map" | "assignments";
 interface Driver { id: number; name: string; active: boolean; }
 interface Vehicle { id: number; plate: string; active: boolean; }
 interface Carrier { id: number; name: string; active: boolean; }
+interface BranchOption { id: number; name: string; active: boolean; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
 
 interface SearchableAssignmentSelectProps {
@@ -486,6 +487,7 @@ export default function RoutesPage() {
     return r ? localizedReasonLabel(r) : "-";
   };
   const canEdit = !user?.is_carrier_master && hasRole("admin_global", "gestor_brasil", "operador_logistico");
+  const canImport = hasRole("admin_global", "gestor_brasil", "operador_logistico");
   const canPlanRoute = (route: RouteItem) => hasRole("admin_global") || (route.status === "planejada" && route.route_date >= new Date().toISOString().slice(0, 10));
   const canUseManagementView = !user?.is_carrier_master && hasRole("admin_global", "gestor_brasil", "operador_logistico");
 
@@ -550,10 +552,8 @@ export default function RoutesPage() {
               </button>
             </div>
           )}
-          {canEdit && <>
-            <button className="btn-ghost" onClick={() => setImportOpen(true)}>{t("route.import")}</button>
-            <button className="btn-primary btn-add" onClick={startNew}><span className="btn-add-symbol">+</span><span>{t("route.new")}</span></button>
-          </>}
+          {canImport && <button className="btn-ghost" onClick={() => setImportOpen(true)}>{t("route.import")}</button>}
+          {canEdit && <button className="btn-primary btn-add" onClick={startNew}><span className="btn-add-symbol">+</span><span>{t("route.new")}</span></button>}
         </div>
       </div>
       {importOpen && <ImportRoutesModal onClose={() => setImportOpen(false)} onImported={reload} />}
@@ -1176,10 +1176,32 @@ interface ImportResult {
 
 function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImported: () => void | Promise<void> }) {
   const { t } = useTranslation();
+  const { user } = useAuth();
   const [file, setFile] = useState<File | null>(null);
+  const [branches, setBranches] = useState<BranchOption[]>([]);
+  const [branchId, setBranchId] = useState(user?.branch_id ? String(user.branch_id) : "");
+  const [loadingBranches, setLoadingBranches] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api.get<BranchOption[]>("/branches").then(({ data }) => {
+      if (!active) return;
+      const available = data.filter((branch) => branch.active);
+      setBranches(available);
+      setBranchId((current) => {
+        if (current && available.some((branch) => String(branch.id) === current)) return current;
+        return available.length === 1 ? String(available[0].id) : "";
+      });
+    }).catch((err: any) => {
+      if (active) setError(err?.response?.data?.detail ?? "Não foi possível carregar as unidades disponíveis.");
+    }).finally(() => {
+      if (active) setLoadingBranches(false);
+    });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!result) return;
@@ -1188,20 +1210,36 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
   }, [result, onClose]);
 
   async function downloadTemplate() {
-    const { data } = await api.get("/routes-import/template.xlsx", { responseType: "blob" });
-    const url = URL.createObjectURL(data);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "modelo-importacao-gestao-adimax.xlsx";
-    link.click();
-    URL.revokeObjectURL(url);
+    if (!branchId) return;
+    setError("");
+    try {
+      const { data } = await api.get("/routes-import/template.xlsx", { params: { branch_id: Number(branchId) }, responseType: "blob" });
+      const url = URL.createObjectURL(data);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "modelo-importacao-gestao-adimax.xlsx";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      let detail = err?.response?.data?.detail;
+      if (!detail && err?.response?.data instanceof Blob) {
+        try {
+          const payload = JSON.parse(await err.response.data.text());
+          detail = payload?.detail;
+        } catch {
+          // Resposta sem JSON: mantém a mensagem amigável abaixo.
+        }
+      }
+      setError(typeof detail === "string" ? detail : "Não foi possível baixar o modelo para esta unidade.");
+    }
   }
 
   async function upload() {
-    if (!file) return;
+    if (!file || !branchId) return;
     setUploading(true); setError(""); setResult(null);
     const payload = new FormData();
     payload.set("file", file);
+    payload.set("branch_id", branchId);
     try {
       const data = await importRoutes<ImportResult>(payload);
       if (!data) return;
@@ -1221,7 +1259,14 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
         <p style={{ color: "var(--muted)", fontSize: 13 }}>{result ? "Importação concluída. Esta janela fechará automaticamente em 3 segundos." : t("route.import_help")}</p>
         {error && <p className="modal-error">{error}</p>}
         {!result && <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <button type="button" className="btn-ghost" onClick={downloadTemplate}>{t("route.import_download_template")}</button>
+          <label className="field">
+            <span>Unidade da importação *</span>
+            <select className="input" value={branchId} disabled={loadingBranches || uploading} onChange={(event) => setBranchId(event.target.value)}>
+              <option value="">{loadingBranches ? "Carregando unidades…" : "Selecione a unidade"}</option>
+              {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+            </select>
+          </label>
+          <button type="button" className="btn-ghost" onClick={downloadTemplate} disabled={!branchId || loadingBranches}>{t("route.import_download_template")}</button>
           <label className="upload-pill" htmlFor="routes-import-file">
             <input id="routes-import-file" type="file" accept=".xlsx,.xlsm,.csv"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
@@ -1241,7 +1286,7 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
         <div className="modal-actions">
           {result ? <button autoFocus type="button" className="btn-primary" onClick={onClose}>OK</button> : <>
           <button type="button" className="btn-ghost" onClick={onClose} disabled={uploading}>{t("common.cancel")}</button>
-          <button type="button" className="btn-primary" onClick={upload} disabled={!file || uploading}>
+          <button type="button" className="btn-primary" onClick={upload} disabled={!file || !branchId || uploading}>
             {uploading ? t("route.import_uploading") : t("route.import_upload")}
           </button>
           </>}

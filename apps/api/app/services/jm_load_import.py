@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.db.models import Branch, Route, RouteStop
 from app.db.session import SessionLocal
 from app.services.import_changes import authorize_changes, collect_changes, snapshot_import
-from app.services.route_carrier import apply_import_carrier, resolve_import_carrier
+from app.services.route_carrier import apply_import_carrier, require_scoped_route, resolve_scoped_import_carrier
 
 
 def _text(value) -> str | None:
@@ -133,7 +133,14 @@ def is_jm_load_workbook(source) -> bool:
         source.seek(0)
 
 
-def import_jm_loads(source, branch_id: int, *, confirmed: bool = False, user_id: int | None = None) -> dict:
+def import_jm_loads(
+    source,
+    branch_id: int,
+    *,
+    confirmed: bool = False,
+    user_id: int | None = None,
+    forced_carrier_id: int | None = None,
+) -> dict:
     source.seek(0)
     workbook = openpyxl.load_workbook(source, read_only=True, data_only=True)
     sheets = {sheet.title: _rows(sheet) for sheet in workbook.worksheets}
@@ -165,6 +172,7 @@ def import_jm_loads(source, branch_id: int, *, confirmed: bool = False, user_id:
             first_meta = next((metadata.get(_text(row.get("NUMERO PEDIDO"))) for row in rows if metadata.get(_text(row.get("NUMERO PEDIDO")))), {})
             planned_date = _date(first_meta.get("DATA PREV. ENTREGA")) or _date(first_meta.get("DATA EMISSAO NFE")) or date.today()
             route = db.scalar(select(Route).where(Route.branch_id == branch_id, Route.codigo_ut == load))
+            require_scoped_route(route, forced_carrier_id)
             is_new_route = route is None
             before_route = snapshot_import(route)
             if is_new_route:
@@ -176,10 +184,11 @@ def import_jm_loads(source, branch_id: int, *, confirmed: bool = False, user_id:
                 route.route_date = planned_date
                 route.delivery_date = planned_date
             collect_changes(changes, before_route, route, load)
-            carrier, carrier_issue = resolve_import_carrier(
+            carrier, carrier_issue = resolve_scoped_import_carrier(
                 db, branch_id,
                 carrier_id=int(_number(rows[0].get("ID TRANSPORTADORA"))) if _number(rows[0].get("ID TRANSPORTADORA")) is not None else None,
                 name=_text(rows[0].get("TRANSPORTADORA")),
+                forced_carrier_id=forced_carrier_id,
             )
             apply_import_carrier(route, carrier, carrier_issue)
             if carrier_issue:

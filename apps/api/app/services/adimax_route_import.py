@@ -14,7 +14,7 @@ from app.db.models import (Branch, Customer, DeliveryDestination, Driver, Route,
                            RouteOrigin, RouteStop, Vehicle)
 from app.db.session import SessionLocal
 from app.services.import_changes import snapshot_import, collect_changes, authorize_changes
-from app.services.route_carrier import apply_import_carrier, resolve_import_carrier
+from app.services.route_carrier import apply_import_carrier, require_scoped_route, resolve_scoped_import_carrier
 
 SHEET = "LAST MILE - ADIMAX"
 ADIMAX_HEADERS = ["DATA CARREGAMENTO", "DATA ENTREGA", "ROTA", "MOTORISTA", "CPF", "PLACA",
@@ -94,7 +94,14 @@ def is_adimax_workbook(source) -> bool:
     return found
 
 
-def import_adimax_routes(source, branch_id: int, *, confirmed: bool = False, user_id: int | None = None) -> dict:
+def import_adimax_routes(
+    source,
+    branch_id: int,
+    *,
+    confirmed: bool = False,
+    user_id: int | None = None,
+    forced_carrier_id: int | None = None,
+) -> dict:
     source.seek(0)
     sheet = openpyxl.load_workbook(source, read_only=True, data_only=True)[SHEET]
     headers = [_text(cell.value) or f"COL_{index}" for index, cell in enumerate(sheet[1], start=1)]
@@ -124,6 +131,7 @@ def import_adimax_routes(source, branch_id: int, *, confirmed: bool = False, use
             carrier_id_index = next((i for i, header in enumerate(normalized_headers) if header == "ID TRANSPORTADORA"), None)
             carrier_name_index = next((i for i, header in enumerate(normalized_headers) if header == "TRANSPORTADORA"), None)
             route = db.scalar(select(Route).where(Route.branch_id == branch_id, Route.codigo_ut == load))
+            require_scoped_route(route, forced_carrier_id)
             new_route = route is None
             before_route = snapshot_import(route)
             if new_route:
@@ -162,10 +170,11 @@ def import_adimax_routes(source, branch_id: int, *, confirmed: bool = False, use
                     db.add(origin); db.flush(); stats["origins_created"] += 1
                 route.origin_id, route.origin_name, route.origin_address = origin.id, origin.name, origin.address
             collect_changes(changes, before_route, route, load)
-            carrier, carrier_issue = resolve_import_carrier(
+            carrier, carrier_issue = resolve_scoped_import_carrier(
                 db, branch_id,
                 carrier_id=int(_number(first[carrier_id_index])) if carrier_id_index is not None and len(first) > carrier_id_index and _number(first[carrier_id_index]) is not None else None,
                 name=_text(first[carrier_name_index]) if carrier_name_index is not None and len(first) > carrier_name_index else None,
+                forced_carrier_id=forced_carrier_id,
             )
             apply_import_carrier(route, carrier, carrier_issue)
             if carrier_issue:

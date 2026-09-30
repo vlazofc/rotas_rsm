@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.db.session import Base
-from app.db.models import AuditLog, Branch, Driver, Route, RouteStop, Tenant, User, Vehicle
+from app.db.models import AuditLog, Branch, Carrier, CarrierBranch, Driver, Route, RouteStop, Tenant, User, Vehicle
 from app.services import generic_route_import as importer
 from app.services import adimax_route_import as adimax
 from app.services import jm_load_import as jm_load
@@ -154,3 +154,37 @@ def test_jm_load_accepts_numero_as_order_and_keeps_address_number(context):
         assert route.route_date == date(2026, 9, 14)
         assert stop.order_number == "14397867"
         assert stop.customer_address == "Rua Teste, 26, Centro"
+
+
+def test_carrier_import_forces_login_carrier_and_rejects_other_carrier_route(context):
+    engine, branch_id, _ = context
+    with Session(engine) as db:
+        branch = db.get(Branch, branch_id)
+        carrier = Carrier(name="JM Transportes", tenant_id=branch.tenant_id)
+        other = Carrier(name="Outra Transportadora", tenant_id=branch.tenant_id)
+        db.add_all([carrier, other]); db.flush()
+        db.add_all([
+            CarrierBranch(carrier_id=carrier.id, branch_id=branch_id),
+            CarrierBranch(carrier_id=other.id, branch_id=branch_id),
+        ])
+        existing = db.scalar(select(Route).where(Route.codigo_ut == "123"))
+        existing.carrier_id = other.id
+        existing.carrier_assignment_status = "valid"
+        db.commit()
+        carrier_id = carrier.id
+
+    source = io.BytesIO("DATA ROTA,ROTA,PEDIDO,DESTINO\n10/09/2026,999,777,Cliente Novo\n".encode())
+    result = importer.import_generic_routes(
+        source,
+        "test.csv",
+        branch_id,
+        forced_carrier_id=carrier_id,
+    )
+    assert result["routes_created"] == 1
+    with Session(engine) as db:
+        imported = db.scalar(select(Route).where(Route.codigo_ut == "999"))
+        assert imported.carrier_id == carrier_id
+        assert imported.carrier_assignment_status == "valid"
+
+    with pytest.raises(RuntimeError, match="outra transportadora"):
+        upload(branch_id, forced_carrier_id=carrier_id)

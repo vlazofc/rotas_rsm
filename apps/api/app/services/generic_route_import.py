@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Branch, Driver, Route, RouteStop, Vehicle
 from app.db.session import SessionLocal
 from app.services.import_changes import snapshot_import, collect_changes, authorize_changes
-from app.services.route_carrier import apply_import_carrier, resolve_import_carrier
+from app.services.route_carrier import apply_import_carrier, require_scoped_route, resolve_scoped_import_carrier
 
 # Cabeçalho humano (o que aparece no modelo baixável) -> chave canônica interna.
 TEMPLATE_COLUMNS: dict[str, str] = {
@@ -219,7 +219,15 @@ def build_template_xlsx() -> io.BytesIO:
     return output
 
 
-def import_generic_routes(source, filename: str, branch_id: int, *, confirmed: bool = False, user_id: int | None = None) -> dict:
+def import_generic_routes(
+    source,
+    filename: str,
+    branch_id: int,
+    *,
+    confirmed: bool = False,
+    user_id: int | None = None,
+    forced_carrier_id: int | None = None,
+) -> dict:
     """Importa o modelo padrão (.xlsx ou .csv) para a filial indicada.
 
     `source`: caminho, bytes ou arquivo binário. `filename`: usado só para
@@ -257,6 +265,7 @@ def import_generic_routes(source, filename: str, branch_id: int, *, confirmed: b
                     Route.branch_id == branch.id, Route.codigo_ut == rota_label, Route.route_date == route_date,
                 )
             )
+            require_scoped_route(route, forced_carrier_id)
             is_new_route = route is None
             before_route = snapshot_import(route)
             if is_new_route:
@@ -275,9 +284,10 @@ def import_generic_routes(source, filename: str, branch_id: int, *, confirmed: b
                 if vehicle: route.vehicle_id = vehicle.id
 
             collect_changes(changes, before_route, route, rota_label)
-            carrier, carrier_issue = resolve_import_carrier(
+            carrier, carrier_issue = resolve_scoped_import_carrier(
                 db, branch.id, carrier_id=parse_int(base.get("carrier_id")),
                 name=parse_str(base.get("carrier_name")),
+                forced_carrier_id=forced_carrier_id,
             )
             apply_import_carrier(route, carrier, carrier_issue)
             if carrier_issue:

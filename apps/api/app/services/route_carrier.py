@@ -23,6 +23,32 @@ def resolve_import_carrier(db: Session, branch_id: int, *, carrier_id: int | Non
     return carrier, None
 
 
+def resolve_scoped_import_carrier(
+    db: Session,
+    branch_id: int,
+    *,
+    carrier_id: int | None,
+    name: str | None,
+    forced_carrier_id: int | None = None,
+) -> tuple[Carrier | None, str | None]:
+    """Força a transportadora do login quando a importação vem do seu portal."""
+    if forced_carrier_id is None:
+        return resolve_import_carrier(db, branch_id, carrier_id=carrier_id, name=name)
+    forced_carrier = db.get(Carrier, forced_carrier_id)
+    forced_name = forced_carrier.name if forced_carrier is not None else None
+    return resolve_import_carrier(
+        db,
+        branch_id,
+        carrier_id=forced_carrier_id,
+        name=forced_name,
+    )
+
+
+def require_scoped_route(route, forced_carrier_id: int | None) -> None:
+    if route is not None and forced_carrier_id is not None and route.carrier_id != forced_carrier_id:
+        raise RuntimeError("A carga informada já pertence a outra transportadora.")
+
+
 def apply_import_carrier(route, carrier: Carrier | None, issue: str | None) -> None:
     route.carrier_id = carrier.id if carrier else None
     route.carrier_assignment_status = "valid" if carrier else "pending_carrier"
