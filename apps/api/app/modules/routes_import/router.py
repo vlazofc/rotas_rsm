@@ -109,7 +109,7 @@ def download_template(branch_id: int | None = None, db: Session = Depends(get_db
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="modelo-importacao-cargas-jm.xlsx"'},
+        headers={"Content-Disposition": 'attachment; filename="modelo-importacao-rotas.xlsx"'},
     )
 
 

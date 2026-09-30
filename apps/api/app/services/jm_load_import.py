@@ -75,14 +75,14 @@ def _rows(sheet) -> list[dict]:
 
 
 def build_jm_template_xlsx(carriers: list[tuple[int, str]] | None = None) -> io.BytesIO:
-    """Gera o modelo no mesmo formato da carga operacional enviada pela JM."""
+    """Gera o modelo único usado pela Adimax e pelas transportadoras."""
     workbook = openpyxl.Workbook()
     detail = workbook.active
     detail.title = "Detalhes da carga"
     detail.append([
-        "Sequência", "Nº Carga", "Número pedido", "NF", "Razão Social / Nome",
-        "Logradouro", "Número", "Bairro", "Cidade", "UF", "PESO BRUTO",
-        "ID Transportadora", "Transportadora", "Observação de Entrega", "Observação Representante",
+        "Transportadora", "Filial", "Sequência", "Nº Carga", "Número pedido", "NF",
+        "Razão Social / Nome", "Logradouro", "Número", "Bairro", "Cidade", "UF",
+        "PESO BRUTO", "ID Transportadora", "Observação de Entrega", "Observação Representante",
     ])
     fiscal = workbook.create_sheet("Notas e datas")
     fiscal.append([
@@ -94,7 +94,9 @@ def build_jm_template_xlsx(carriers: list[tuple[int, str]] | None = None) -> io.
     instructions.append(["ORIENTAÇÃO", "DETALHE"])
     instructions.append(["Nome das abas", "Pode ser alterado; a identificação é feita pelas colunas."])
     instructions.append(["Número do pedido", "Também pode ser informado como Número ou Número pedido."])
-    instructions.append(["Transportadora", "Preencha o ID e o nome exatamente como aparecem na aba Transportadoras. O ID define o acesso à rota."])
+    instructions.append(["Modelo único", "Este mesmo arquivo atende a administração Adimax e o portal da transportadora."])
+    instructions.append(["Transportadora", "No acesso Adimax, preencha o ID e o nome como aparecem na aba Transportadoras. No portal da transportadora, a empresa do login é aplicada automaticamente."])
+    instructions.append(["Filial", "A unidade selecionada no sistema define onde as rotas serão importadas; a coluna Filial é apenas informativa."])
     instructions.append(["Detalhes da carga", "Uma linha por entrega. Sequência, Nº Carga e pedido são obrigatórios."])
     instructions.append(["Notas e datas", "Use o mesmo pedido da primeira aba para atualizar NF e datas, inclusive retroativamente."])
     for sheet in (detail, fiscal, instructions):
@@ -106,6 +108,11 @@ def build_jm_template_xlsx(carriers: list[tuple[int, str]] | None = None) -> io.
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
     instructions.column_dimensions["B"].width = 95
+    for column, width in {
+        "A": 18, "B": 10, "C": 16, "E": 17, "F": 16, "G": 23,
+        "H": 16, "N": 21, "O": 25, "P": 28,
+    }.items():
+        detail.column_dimensions[column].width = width
     reference = workbook.create_sheet("Transportadoras")
     reference.append(["ID TRANSPORTADORA", "TRANSPORTADORA"])
     for carrier_id, carrier_name in carriers or []:

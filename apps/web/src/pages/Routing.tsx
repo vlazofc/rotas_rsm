@@ -69,7 +69,7 @@ export default function Routing() {
   async function downloadTemplate() {
     const { data } = await api.get("/routes-import/template.xlsx", { responseType: "blob" });
     const url = URL.createObjectURL(data); const link = document.createElement("a");
-    link.href = url; link.download = "modelo-importacao-gestao-adimax.xlsx"; link.click(); URL.revokeObjectURL(url);
+    link.href = url; link.download = "modelo-importacao-rotas.xlsx"; link.click(); URL.revokeObjectURL(url);
   }
   async function upload() {
     if (!file) return;

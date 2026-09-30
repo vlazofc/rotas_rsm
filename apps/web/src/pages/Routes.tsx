@@ -1217,7 +1217,7 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
       const url = URL.createObjectURL(data);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "modelo-importacao-gestao-adimax.xlsx";
+      link.download = "modelo-importacao-rotas.xlsx";
       link.click();
       URL.revokeObjectURL(url);
     } catch (err: any) {

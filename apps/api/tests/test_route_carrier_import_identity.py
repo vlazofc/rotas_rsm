@@ -54,8 +54,11 @@ def test_template_lists_carrier_ids_and_names():
     workbook = openpyxl.load_workbook(build_jm_template_xlsx([(7, "Transportadora Alfa"), (9, "Transportadora Beta")]))
     try:
         detail_headers = [cell.value for cell in workbook["Detalhes da carga"][1]]
-        assert "ID Transportadora" in detail_headers
-        assert "Transportadora" in detail_headers
+        assert detail_headers == [
+            "Transportadora", "Filial", "Sequência", "Nº Carga", "Número pedido", "NF",
+            "Razão Social / Nome", "Logradouro", "Número", "Bairro", "Cidade", "UF",
+            "PESO BRUTO", "ID Transportadora", "Observação de Entrega", "Observação Representante",
+        ]
         assert list(workbook["Transportadoras"].values) == [
             ("ID TRANSPORTADORA", "TRANSPORTADORA"),
             (7, "Transportadora Alfa"),
@@ -63,3 +66,18 @@ def test_template_lists_carrier_ids_and_names():
         ]
     finally:
         workbook.close()
+
+
+def test_same_template_layout_serves_adimax_and_carrier_scope():
+    adimax = openpyxl.load_workbook(build_jm_template_xlsx([(7, "Alfa"), (9, "Beta")]))
+    carrier = openpyxl.load_workbook(build_jm_template_xlsx([(7, "Alfa")]))
+    try:
+        assert adimax.sheetnames == carrier.sheetnames == [
+            "Detalhes da carga", "Notas e datas", "Instruções", "Transportadoras",
+        ]
+        assert list(adimax["Detalhes da carga"].values) == list(carrier["Detalhes da carga"].values)
+        assert list(adimax["Transportadoras"].values)[1:] == [(7, "Alfa"), (9, "Beta")]
+        assert list(carrier["Transportadoras"].values)[1:] == [(7, "Alfa")]
+    finally:
+        adimax.close()
+        carrier.close()
