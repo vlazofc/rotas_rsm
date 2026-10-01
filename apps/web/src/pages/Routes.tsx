@@ -8,6 +8,7 @@ import { applyTimemark } from "../services/timemark";
 import { useAuth } from "../context/AuthContext";
 import { usePolling } from "../hooks/usePolling";
 import RouteMap from "../components/RouteMap";
+import SearchableAssignmentSelect from "../components/SearchableAssignmentSelect";
 
 const REFRESH_INTERVAL_MS = 20000;
 
@@ -49,60 +50,6 @@ interface Vehicle { id: number; plate: string; active: boolean; }
 interface Carrier { id: number; name: string; active: boolean; }
 interface BranchOption { id: number; name: string; active: boolean; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
-
-interface SearchableAssignmentSelectProps {
-  value: string;
-  query: string;
-  placeholder: string;
-  emptyLabel: string;
-  options: { id: number; label: string }[];
-  onQueryChange: (query: string, selectedId: string) => void;
-}
-
-function SearchableAssignmentSelect({ value, query, placeholder, emptyLabel, options, onQueryChange }: SearchableAssignmentSelectProps) {
-  const [open, setOpen] = useState(false);
-  const normalizedQuery = query.trim().toLocaleLowerCase("pt-BR");
-  const filtered = options.filter((option) => option.label.toLocaleLowerCase("pt-BR").includes(normalizedQuery)).slice(0, 30);
-
-  return (
-    <div className="assignment-search-select">
-      <input
-        required
-        className="input"
-        type="search"
-        placeholder={placeholder}
-        autoComplete="off"
-        value={query}
-        aria-expanded={open}
-        onFocus={() => setOpen(true)}
-        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
-        onChange={(event) => {
-          const nextQuery = event.target.value;
-          const exact = options.find((option) => option.label.localeCompare(nextQuery.trim(), "pt-BR", { sensitivity: "accent" }) === 0);
-          onQueryChange(nextQuery, exact ? String(exact.id) : "");
-          setOpen(true);
-        }}
-      />
-      {value && <span className="assignment-selected-mark" aria-label="Selecionado">✓</span>}
-      {open && (
-        <div className="assignment-search-options" role="listbox">
-          {filtered.length ? filtered.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              className={String(option.id) === value ? "selected" : ""}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => { onQueryChange(option.label, String(option.id)); setOpen(false); }}
-            >
-              {option.label}
-              {String(option.id) === value && <span>✓</span>}
-            </button>
-          )) : <p>{emptyLabel}</p>}
-        </div>
-      )}
-    </div>
-  );
-}
 
 const STATUS_COLOR: Record<string, string> = {
   planejada: "#64748b", em_carregamento: "#0ea5e9", liberada: "#a855f7",

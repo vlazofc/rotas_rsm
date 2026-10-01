@@ -7,6 +7,7 @@ import {appConfirm} from "../components/AppDialog";
 import { applyTimemark } from "../services/timemark";
 import { useAuth } from "../context/AuthContext";
 import { usePolling } from "../hooks/usePolling";
+import SearchableAssignmentSelect from "../components/SearchableAssignmentSelect";
 
 const REFRESH_INTERVAL_MS = 20000;
 
@@ -111,6 +112,7 @@ export default function RouteDetail() {
   });
   const [editHeader, setEditHeader] = useState(false);
   const [header, setHeader] = useState({ origin_name: "", origin_address: "", route_date: "", driver_id: "", vehicle_id: "", status: "", status_justification: "", vehicle_requested: "", vehicle_sent: "", helper_assigned: false, tracked: false, driver_payment_amount: "", driver_payment_notes: "" });
+  const [driverQuery, setDriverQuery] = useState("");
   const [editingStop, setEditingStop] = useState<"new" | number | null>(null);
   const [stopForm, setStopForm] = useState({ ...EMPTY_STOP });
   const [error, setError] = useState("");
@@ -213,6 +215,7 @@ export default function RouteDetail() {
   };
 
   function startEditHeader() {
+    setDriverQuery(drivers.find((driver) => driver.id === route!.driver_id)?.name ?? "");
     setHeader({
       origin_name: route!.origin_name ?? "", origin_address: route!.origin_address ?? "",
       route_date: route!.route_date ?? "", driver_id: route!.driver_id ? String(route!.driver_id) : "",
@@ -226,6 +229,7 @@ export default function RouteDetail() {
   }
   async function saveHeader(e: React.FormEvent) {
     e.preventDefault(); setError("");
+    if (driverQuery.trim() && !header.driver_id) return;
     try {
       await api.put(`/routes/${id}`, {
         origin_name: header.origin_name || null, origin_address: header.origin_address || null,
@@ -577,10 +581,19 @@ export default function RouteDetail() {
               <Field label={t("rd.address")}><input style={input} value={header.origin_address}
                 onChange={(e) => setHeader({ ...header, origin_address: e.target.value })} /></Field>
               <Field label={t("route.driver")}>
-                <select style={input} value={header.driver_id} onChange={(e) => setHeader({ ...header, driver_id: e.target.value })}>
-                  <option value="">—</option>
-                  {drivers.map((dr) => <option key={dr.id} value={dr.id}>{dr.name}</option>)}
-                </select>
+                <SearchableAssignmentSelect
+                  value={header.driver_id}
+                  query={driverQuery}
+                  placeholder="Busque pelo nome do motorista"
+                  emptyLabel="Nenhum motorista encontrado."
+                  options={drivers.map((driver) => ({ id: driver.id, label: driver.name }))}
+                  required={false}
+                  onQueryChange={(query, selectedId) => {
+                    setDriverQuery(query);
+                    setHeader((current) => ({ ...current, driver_id: selectedId }));
+                  }}
+                />
+                {driverQuery.trim() && !header.driver_id && <small style={{ color: "#b42318" }}>Selecione um motorista da lista.</small>}
               </Field>
               <Field label={t("route.vehicle")}>
                 <select style={input} value={header.vehicle_id} onChange={(e) => {
@@ -626,7 +639,7 @@ export default function RouteDetail() {
               )}
             </div>
             <div style={{ marginTop: 12 }}>
-              <button type="submit" style={primary}>{t("common.save")}</button>
+              <button type="submit" style={primary} disabled={Boolean(driverQuery.trim() && !header.driver_id)}>{t("common.save")}</button>
               <button type="button" style={ghost} onClick={() => setEditHeader(false)}>{t("common.cancel")}</button>
             </div>
           </form>
