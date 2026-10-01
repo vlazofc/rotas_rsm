@@ -19,7 +19,7 @@ from app.core.permissions import (
     ROLE_EQUIVALENTS, Role, has_all_branches_policy, has_all_environment_access,
     require_branch_access, require_internal_permission, require_internal_roles, require_roles, scope_by_branch, user_branch_ids,
 )
-from app.db.models import Attachment, Branch, BranchApprovalPolicy, Carrier, CarrierBranch, CarrierUser, DeliveryFailureReason, DockSession, Driver, DriverBranch, Route, RouteCarrierChange, RouteOccurrence, RouteOccurrenceEvent, RouteObservation, RouteStop, RouteStopOperation, Checkin, User, Vehicle, VehicleBranch
+from app.db.models import Attachment, Branch, BranchApprovalPolicy, Carrier, CarrierBranch, CarrierMaster, CarrierUser, DeliveryFailureReason, DockSession, Driver, DriverBranch, Route, RouteCarrierChange, RouteOccurrence, RouteOccurrenceEvent, RouteObservation, RouteStop, RouteStopOperation, Checkin, User, Vehicle, VehicleBranch
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.modules.routes.schemas import (
@@ -80,6 +80,7 @@ def _validate_route_resources(
     branch_id: int,
     driver_id: int | None,
     vehicle_id: int | None,
+    carrier_id: int | None = None,
 ) -> None:
     """Impede relacionamentos cruzados entre filiais/tenants numa rota."""
     route_branch = db.get(Branch, branch_id)
@@ -90,6 +91,8 @@ def _validate_route_resources(
         driver = db.get(Driver, driver_id)
         if driver is None or driver.tenant_id != route_branch.tenant_id:
             raise HTTPException(status_code=422, detail="Motorista não pertence à empresa da rota.")
+        if carrier_id is not None and driver.carrier_id != carrier_id:
+            raise HTTPException(status_code=422, detail="Motorista não pertence à transportadora da rota.")
         if not driver.active or driver.blocked:
             raise HTTPException(status_code=422, detail="Motorista inativo ou bloqueado não pode ser escalado.")
         availability = db.scalar(select(DriverBranch).where(DriverBranch.driver_id == driver_id, DriverBranch.branch_id == branch_id))
@@ -100,6 +103,8 @@ def _validate_route_resources(
         vehicle = db.get(Vehicle, vehicle_id)
         if vehicle is None or vehicle.tenant_id != route_branch.tenant_id:
             raise HTTPException(status_code=422, detail="Veículo não pertence à empresa da rota.")
+        if carrier_id is not None and vehicle.carrier_id != carrier_id:
+            raise HTTPException(status_code=422, detail="Veículo não pertence à transportadora da rota.")
         if not vehicle.active or vehicle.blocked:
             raise HTTPException(status_code=422, detail="Veículo inativo ou bloqueado não pode ser escalado.")
         availability = db.scalar(select(VehicleBranch).where(VehicleBranch.vehicle_id == vehicle_id, VehicleBranch.branch_id == branch_id))
@@ -122,6 +127,25 @@ def _validate_route_carrier(db: Session, branch_id: int, carrier_id: int | None)
 
 def _carrier_membership(db: Session, user: User) -> CarrierUser | None:
     return db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+
+
+def _require_route_editor(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+    """Master gerencia as rotas da própria transportadora; demais perfis seguem internos."""
+    membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id))
+    if membership is not None:
+        if not membership.active:
+            raise HTTPException(403, detail="Vínculo com a transportadora inativo.")
+        master = db.scalar(select(CarrierMaster.id).where(
+            CarrierMaster.user_id == user.id,
+            CarrierMaster.carrier_id == membership.carrier_id,
+            CarrierMaster.active.is_(True),
+        ))
+        if user.role != Role.GESTOR_BRASIL.value or master is None:
+            raise HTTPException(403, detail="Somente o master pode gerenciar rotas da transportadora.")
+        return user
+    if user.role not in {Role.ADMIN_GLOBAL.value, Role.GESTOR_BRASIL.value, Role.OPERADOR_LOGISTICO.value}:
+        raise HTTPException(403, detail="Perfil sem permissão para esta ação.")
+    return user
 
 
 def _carrier_branch_ids(db: Session, user: User, carrier_id: int) -> set[int]:
@@ -448,11 +472,14 @@ def get_route(route_id: int, db: Session = Depends(get_db), user: User = Depends
 
 
 @router.post("", response_model=RouteOut,
-             dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
+             dependencies=[Depends(_require_route_editor)])
 def create_route(data: RouteIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     require_branch_access(db, user, data.branch_id)
+    membership = _carrier_membership(db, user)
+    if membership is not None and (data.carrier_id != membership.carrier_id or data.branch_id not in _carrier_branch_ids(db, user, membership.carrier_id)):
+        raise HTTPException(403, detail="Rota fora da transportadora ou das filiais autorizadas.")
     _validate_route_carrier(db, data.branch_id, data.carrier_id)
-    _validate_route_resources(db, data.branch_id, data.driver_id, data.vehicle_id)
+    _validate_route_resources(db, data.branch_id, data.driver_id, data.vehicle_id, data.carrier_id)
     payload = data.model_dump(exclude={"stops"})
     route = Route(**payload, carrier_assignment_status="valid", carrier_assignment_issue=None, created_by=user.id)
     route.dock_session = DockSession()
@@ -467,7 +494,7 @@ def create_route(data: RouteIn, db: Session = Depends(get_db), user: User = Depe
 
 # ----------------------- Edição de rota e paradas -----------------------
 
-_EDITOR = Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))
+_EDITOR = Depends(_require_route_editor)
 
 
 def _guard_not_cancelled(route: Route) -> None:
@@ -504,6 +531,7 @@ def update_route(route_id: int, data: RouteUpdate,
         route.branch_id,
         updates.get("driver_id", route.driver_id),
         updates.get("vehicle_id", route.vehicle_id),
+        route.carrier_id,
     )
     before = snapshot(route, list(updates))
     for field, value in updates.items():
@@ -690,7 +718,7 @@ def assign_route(route_id: int, data: RouteAssignmentIn,
     require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     updates = data.model_dump()
-    _validate_route_resources(db, route.branch_id, updates["driver_id"], updates["vehicle_id"])
+    _validate_route_resources(db, route.branch_id, updates["driver_id"], updates["vehicle_id"], route.carrier_id)
     before = snapshot(route, ["driver_id", "vehicle_id"])
     route.driver_id, route.vehicle_id = updates["driver_id"], updates["vehicle_id"]
     log_update(db, user_id=user.id, entity="route_assignment", entity_id=route.id,
@@ -1163,7 +1191,7 @@ async def upload_loaded_return_photo(
 
 
 @router.post("/{route_id}/close", response_model=RouteOut,
-             dependencies=[Depends(require_internal_roles(Role.ADMIN_GLOBAL, Role.GESTOR_BRASIL, Role.OPERADOR_LOGISTICO))])
+             dependencies=[_EDITOR])
 def close_route(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
     require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)

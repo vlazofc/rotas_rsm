@@ -456,7 +456,7 @@ export default function RoutesPage() {
     };
     try {
       if (editing === "new") {
-        await api.post("/routes", { branch_id: user?.branch_id ?? 1, ...payload, stops: [] });
+        await api.post("/routes", { branch_id: user?.branch_id ?? 1, carrier_id: user?.carrier_id ?? null, ...payload, stops: [] });
       } else if (typeof editing === "number") {
         await api.put(`/routes/${editing}`, payload);
       }
@@ -486,10 +486,10 @@ export default function RoutesPage() {
     const r = reasons.find((r) => r.id === id);
     return r ? localizedReasonLabel(r) : "-";
   };
-  const canEdit = !user?.is_carrier_master && hasRole("admin_global", "gestor_brasil", "operador_logistico");
+  const canEdit = user?.is_carrier_master || (!user?.carrier_id && hasRole("admin_global", "gestor_brasil", "operador_logistico"));
   const canImport = hasRole("admin_global", "gestor_brasil", "operador_logistico");
   const canPlanRoute = (route: RouteItem) => hasRole("admin_global") || (route.status === "planejada" && route.route_date >= new Date().toISOString().slice(0, 10));
-  const canUseManagementView = !user?.is_carrier_master && hasRole("admin_global", "gestor_brasil", "operador_logistico");
+  const canUseManagementView = canEdit;
 
   useEffect(() => {
     if (!canUseManagementView && routeView !== "map") setRouteView("map");

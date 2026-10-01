@@ -479,7 +479,7 @@ export default function RouteDetail() {
   const canRelease = hasRole("operador_logistico");
   const canClose = hasRole("gestor_brasil", "operador_logistico");
   const canOperateDock = hasRole("motorista", "operador_logistico");
-  const canEditRoute = isAdmin;
+  const canEditRoute = isAdmin || Boolean(user?.is_carrier_master);
   const isRouteDeparted = Boolean(route.dock_session?.departure_cd_at || route.status === "em_rota" || route.status === "finalizada");
   const isStopClosed = (s: Stop) => s.status === "entregue" || s.status === "falha" || s.status === "devolvido";
   const allStopsClosed = route.stops.length > 0 && route.stops.every(isStopClosed);
