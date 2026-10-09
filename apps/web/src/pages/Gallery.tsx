@@ -9,7 +9,7 @@ interface Driver { id:number; name:string; active:boolean }
 interface Vehicle { id:number; plate:string; active:boolean }
 type Filters = { query:string; plate:string; driver_id:string; kind:string; start:string; end:string };
 
-const KINDS = ["entrega", "devolucao", "manutencao", "orcamento"];
+const KINDS = ["entrega", "devolucao"];
 const EMPTY_FILTERS: Filters = { query:"", plate:"", driver_id:"", kind:"", start:"", end:"" };
 const isImage = (contentType?:string|null) => !!contentType?.startsWith("image/");
 const formatDate = (value:string) => new Date(`${value}T12:00:00`).toLocaleDateString("pt-BR");
