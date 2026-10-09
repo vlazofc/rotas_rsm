@@ -207,8 +207,12 @@ export default function Users() {
 
   const masterUserIds=new Set(carrierMasters.map(master=>master.user_id));
   const isCarrierContext=Boolean(me?.is_carrier_master);
-  const internalUsers=users.filter((user) => user.role!=="motorista"&&!masterUserIds.has(user.id)&&(isCarrierContext?Boolean(user.carrier_id):!user.carrier_id));
-  const visibleUsers = users.filter((user) => section === "drivers" ? user.role === "motorista" : section === "masters" ? masterUserIds.has(user.id) : section === "carrier_users" ? Boolean(user.carrier_id)&&!masterUserIds.has(user.id)&&user.role!=="motorista" : internalUsers.some(internal=>internal.id===user.id));
+  // Admin Global é sempre interno, mesmo que tenha um carrier_id vinculado por engano —
+  // sem isso ele ficava escondido da aba padrão e parecia "sumido" do sistema.
+  const isAlwaysInternal=(user: UserRow) => user.role==="admin_global";
+  const internalUsers=users.filter((user) => user.role!=="motorista"&&!masterUserIds.has(user.id)&&(isAlwaysInternal(user)||(isCarrierContext?Boolean(user.carrier_id):!user.carrier_id)));
+  const carrierOnlyUsers=users.filter((user) => Boolean(user.carrier_id)&&!masterUserIds.has(user.id)&&user.role!=="motorista"&&!isAlwaysInternal(user));
+  const visibleUsers = users.filter((user) => section === "drivers" ? user.role === "motorista" : section === "masters" ? masterUserIds.has(user.id) : section === "carrier_users" ? carrierOnlyUsers.some(carrierUser=>carrierUser.id===user.id) : internalUsers.some(internal=>internal.id===user.id));
 
   return (
     <div>
@@ -253,7 +257,7 @@ export default function Users() {
           {isCarrierContext?"Usuários da transportadora":"Usuários internos"} <span style={sectionCount}>{usersLoading ? "…" : internalUsers.length}</span>
         </button>
         {!me?.is_carrier_master&&<button type="button" onClick={() => setSection("carrier_users")} style={{...sectionButton,...(section === "carrier_users" ? sectionButtonActive : {})}}>
-          Usuários de transportadoras <span style={sectionCount}>{usersLoading ? "…" : users.filter(user=>Boolean(user.carrier_id)&&!masterUserIds.has(user.id)&&user.role!=="motorista").length}</span>
+          Usuários de transportadoras <span style={sectionCount}>{usersLoading ? "…" : carrierOnlyUsers.length}</span>
         </button>}
         <button type="button" onClick={() => setSection("drivers")} style={{...sectionButton,...(section === "drivers" ? sectionButtonActive : {})}}>
           Acesso de motoristas <span style={sectionCount}>{usersLoading ? "…" : users.filter(user => user.role === "motorista").length}</span>
