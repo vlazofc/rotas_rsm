@@ -26,6 +26,7 @@ from app.modules.drivers.router import router as drivers_router
 from app.modules.failure_reasons.router import router as failure_reasons_router
 from app.modules.gallery.router import router as gallery_router
 from app.modules.erp_admin.router import router as erp_admin_router
+from app.modules.integration.router import router as integration_router
 from app.modules.notifications.router import router as notifications_router
 from app.modules.operational_settings.router import router as operational_settings_router
 from app.modules.manual_routing.router import router as manual_routing_router
@@ -148,5 +149,6 @@ for r in (
     tenants_router, vehicle_types_router, branding_router, carriers_router,
     routes_import_router, gallery_router, erp_admin_router, notifications_router,
     tracking_router, operational_settings_router, manual_routing_router, access_model_router,
+    integration_router,
 ):
     app.include_router(r, prefix=prefix)

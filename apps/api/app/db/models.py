@@ -1550,6 +1550,19 @@ class AccountingPeriod(Base, TimestampMixin):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ApiToken(Base, TimestampMixin):
+    """Token de integração externa (parceiros/ERP). Autentica como o usuário vinculado."""
+    __tablename__ = "api_tokens"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(12), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    user: Mapped["User"] = relationship(foreign_keys=[user_id])
 
 
 # --- Preenchimento automático de tenant_id (multiempresa) ---------------------
