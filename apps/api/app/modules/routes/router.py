@@ -307,11 +307,17 @@ def _guard_not_expired(route: Route, user: User, db: Session | None = None) -> N
         return
     today = datetime.now(ZoneInfo(settings.app_timezone)).date()
     if route.route_date < today:
+        if db is not None:
+            if _is_active_carrier_master(db, user):
+                return
+            carrier_link = db.scalar(select(CarrierUser.id).where(CarrierUser.user_id == user.id))
+            if carrier_link is None and user.role in {Role.GESTOR_BRASIL.value, Role.OPERADOR_LOGISTICO.value}:
+                return
         if db is not None and route.driver_id is not None and route.driver_id in _driver_ids(db, user):
             return
         raise HTTPException(
             status_code=409,
-            detail="Data da carga ultrapassada. Apenas o administrador global pode corrigir esta rota.",
+            detail="Data da carga ultrapassada. Este usuário não pode operar esta rota.",
         )
 
 
@@ -666,6 +672,20 @@ def _set_dock_time(db, route_id, user, field, event_type, status_after=None):
 
 
 _OP = Depends(_require_route_operation_access)
+
+
+def _require_route_close_access(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+) -> User:
+    # A equipe administrativa gerencia o encerramento, mesmo sem perfil de operador.
+    if user.role == Role.GESTOR_BRASIL.value:
+        membership = db.scalar(select(CarrierUser.id).where(CarrierUser.user_id == user.id))
+        if membership is None:
+            return user
+    return _require_route_operation_access(user, db)
+
+
+_CLOSE = Depends(_require_route_close_access)
 
 
 @router.post("/{route_id}/arrive-cd", response_model=RouteOut, dependencies=[_OP])
@@ -1229,7 +1249,7 @@ async def upload_loaded_return_photo(
 
 
 @router.post("/{route_id}/close", response_model=RouteOut,
-             dependencies=[_OP])
+             dependencies=[_CLOSE])
 def close_route(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
     require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
