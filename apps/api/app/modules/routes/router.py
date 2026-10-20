@@ -1229,12 +1229,13 @@ async def upload_loaded_return_photo(
 
 
 @router.post("/{route_id}/close", response_model=RouteOut,
-             dependencies=[_EDITOR])
+             dependencies=[_OP])
 def close_route(route_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     route = _load(db, route_id)
     require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
+    _guard_driver_assignment(db, user, route)
     _guard_editable(route)
-    _guard_not_expired(route, user)
+    _guard_not_expired(route, user, db)
     if not route.dock_session or not route.dock_session.departure_cd_at:
         raise HTTPException(status_code=409, detail="Registre a saída do CD antes de fechar a rota.")
     _guard_all_stops_closed(route)
