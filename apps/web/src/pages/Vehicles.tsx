@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import api from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import {appPrompt} from "../components/AppDialog";
+import { vehicleTypeLabel } from "../utils/vehicleTypeLabel";
 
 type Owner = {
   id: number;
@@ -124,7 +125,7 @@ const statusLabel: Record<string, string> = {
 };
 
 export default function Vehicles() {
-  const { user, hasRole } = useAuth(),
+  const { hasRole } = useAuth(),
     manager = hasRole("admin_global", "gestor_brasil"),
     [rows, setRows] = useState<Vehicle[]>([]),
     [owners, setOwners] = useState<Owner[]>([]),
@@ -208,13 +209,11 @@ export default function Vehicles() {
     e.preventDefault();
     setError("");
     try {
-      if (form.ownership_type === "agregado" && !form.owner_id) throw new Error("Selecione ou cadastre o proprietário do veículo agregado.");
-      if (form.ownership_type === "agregado" && !String(form.antt_number || "").trim()) throw new Error("Informe a ANTT vinculada ao veículo agregado.");
       if (form.ownership_type === "agregado" && form.freight_receiver_type === "terceiro" && !form.carrier_id) throw new Error("Selecione o arrendatário/beneficiário que receberá o frete.");
       if (editing === "new") {
         if (!crlv) throw new Error("O arquivo do CRLV é obrigatório.");
         const data = new FormData();
-        Object.entries({ ...form, branch_id: user?.branch_id || 1 }).forEach(
+        Object.entries(form).forEach(
           ([k, v]) => {
             if (v !== "" && k !== "change_reason") data.set(k, String(v));
           },
@@ -246,7 +245,7 @@ export default function Vehicles() {
   async function createInlineOwner() {
     setError("");
     try {
-      const response = await api.post<Owner>("/vehicles/owners", ownerForm);
+      const response = await api.post<Owner>("/vehicles/owners", { ...ownerForm, carrier_id: form.carrier_id || null });
       setOwners((current) => [...current, response.data].sort((a, b) => a.name.localeCompare(b.name)));
       setForm({ ...form, owner_id: response.data.id });
       setOwnerSearch(response.data.name);
@@ -379,7 +378,7 @@ export default function Vehicles() {
                   </span>
                   <span>
                     <small>Tipologia</small>
-                    {v.vehicle_type_label || "—"}
+                    {vehicleTypeLabel(v.vehicle_type_label)}
                   </span>
                   <span>
                     <small>Idade</small>
@@ -586,8 +585,8 @@ export default function Vehicles() {
                 </select>
               </F>
               {form.ownership_type === "agregado" ? <div className="vehicle-owner-picker">
-                <label className="field"><span>Proprietário {form.ownership_type === "agregado" ? "*" : "(opcional)"}</span>
-                  <input className="input" required={form.ownership_type === "agregado"} value={ownerSearch} placeholder="Digite nome ou CPF/CNPJ" autoComplete="off" onChange={(e) => { setOwnerSearch(e.target.value); setForm({ ...form, owner_id: "" }); setInlineOwnerOpen(false); }} />
+                <label className="field"><span>Proprietário (opcional)</span>
+                  <input className="input" value={ownerSearch} placeholder="Digite nome ou CPF/CNPJ" autoComplete="off" onChange={(e) => { setOwnerSearch(e.target.value); setForm({ ...form, owner_id: "" }); setInlineOwnerOpen(false); }} />
                 </label>
                 {ownerSearch.trim().length > 0 && ownerSearch.trim().length < 3 && <small className="owner-search-hint">Digite pelo menos 3 caracteres para pesquisar.</small>}
                 <button type="button" className="owner-create-trigger" onClick={() => {
@@ -600,7 +599,7 @@ export default function Vehicles() {
                   {!suggestedOwners.length && <div className="owner-not-found"><span>Nenhum proprietário encontrado.</span><button type="button" className="btn-mini" onClick={() => { setOwnerForm({ ...ownerBlank, name: ownerSearch }); setInlineOwnerOpen(true); }}>+ Cadastrar agora</button></div>}
                 </div>}
               </div> : <div className="company-owner-auto"><strong>Empresa contratante</strong><span>O proprietário e a ANTT serão preenchidos automaticamente usando os Dados da empresa em Configuração.</span></div>}
-              {form.ownership_type === "agregado" && <div className="freight-receiver-picker"><span>Quem recebe o frete? *</span><div className="owner-person-toggle"><button type="button" className={form.freight_receiver_type==="proprietario"?"active":""} onClick={()=>setForm({...form,freight_receiver_type:"proprietario",carrier_id:""})}><strong>PRO</strong><span>Proprietário</span></button><button type="button" className={form.freight_receiver_type==="terceiro"?"active":""} onClick={()=>setForm({...form,freight_receiver_type:"terceiro"})}><strong>3º</strong><span>Terceiro</span></button></div>{form.freight_receiver_type==="terceiro"&&<select className="input" required value={form.carrier_id} onChange={e=>setForm({...form,carrier_id:Number(e.target.value)})}><option value="">Selecione o arrendatário/beneficiário</option>{carriers.filter(c=>c.antt_number).map(c=><option key={c.id} value={c.id}>{c.name} · {c.kind==="beneficiario"?"Beneficiário":"Arrendatário"} · ANTT {c.antt_number}</option>)}</select>}{editing!=="new"&&(editing as Vehicle).carrier_id&&<small className="receiver-lock-note">Para trocar o terceiro atual, selecione Proprietário e salve primeiro. Depois reabra o veículo e vincule o novo responsável.</small>}</div>}
+              {form.ownership_type === "agregado" && <div className="freight-receiver-picker"><span>Quem recebe o frete? *</span><div className="owner-person-toggle"><button type="button" className={form.freight_receiver_type==="proprietario"?"active":""} onClick={()=>setForm({...form,freight_receiver_type:"proprietario",carrier_id:""})}><strong>PRO</strong><span>Proprietário</span></button><button type="button" className={form.freight_receiver_type==="terceiro"?"active":""} onClick={()=>setForm({...form,freight_receiver_type:"terceiro"})}><strong>3º</strong><span>Terceiro</span></button></div>{form.freight_receiver_type==="terceiro"&&<select className="input" required value={form.carrier_id} onChange={e=>setForm({...form,carrier_id:Number(e.target.value)})}><option value="">Selecione o arrendatário/beneficiário</option>{carriers.map(c=><option key={c.id} value={c.id}>{c.name} · {c.kind==="beneficiario"?"Beneficiário":"Arrendatário"} · ANTT {c.antt_number || "não informada"}</option>)}</select>}{editing!=="new"&&(editing as Vehicle).carrier_id&&<small className="receiver-lock-note">Para trocar o terceiro atual, selecione Proprietário e salve primeiro. Depois reabra o veículo e vincule o novo responsável.</small>}</div>}
               <F label="Tipologia">
                 <select
                   className="input"
@@ -616,15 +615,15 @@ export default function Vehicles() {
                   <option value="">Selecione</option>
                   {kinds.map((k) => (
                     <option key={k.id} value={k.id}>
-                      {k.label_pt_br || k.label}
+                      {vehicleTypeLabel(k.label_pt_br || k.label)}
                     </option>
                   ))}
                 </select>
               </F>
               {form.ownership_type === "agregado" && <>
-                <F label="ANTT vinculada ao veículo *"><input className="input" required value={form.antt_number} placeholder="Número do RNTRC/ANTT" onChange={(e) => setForm({ ...form, antt_number: e.target.value.toUpperCase() })} /></F>
+                <F label="ANTT vinculada ao veículo"><input className="input" value={form.antt_number} placeholder="Número do RNTRC/ANTT" onChange={(e) => setForm({ ...form, antt_number: e.target.value.toUpperCase() })} /></F>
                 <F label="Validade da ANTT"><input className="input" type="date" value={form.antt_expiry_date} onChange={(e) => setForm({ ...form, antt_expiry_date: e.target.value })} /></F>
-                <div className="vehicle-antt-notice">A ANTT informada ficará vinculada a este veículo agregado e será mantida no histórico de auditoria.</div>
+                <div className="vehicle-antt-notice">A ANTT pode ser preenchida depois; ela não impede o cadastro nem a escala do veículo.</div>
               </>}
               <F label="Eixos">
                 <input

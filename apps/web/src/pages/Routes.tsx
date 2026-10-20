@@ -9,6 +9,7 @@ import { useAuth } from "../context/AuthContext";
 import { usePolling } from "../hooks/usePolling";
 import RouteMap from "../components/RouteMap";
 import SearchableAssignmentSelect from "../components/SearchableAssignmentSelect";
+import RouteOriginSelect from "../components/RouteOriginSelect";
 
 const REFRESH_INTERVAL_MS = 20000;
 
@@ -47,8 +48,8 @@ type RouteFilter = "open" | "backlog" | "closed" | "all";
 type RouteView = "map" | "assignments";
 interface Driver { id: number; name: string; active: boolean; }
 interface Vehicle { id: number; plate: string; active: boolean; }
+interface AssignmentOptions { driver_ids: number[]; vehicle_ids: number[]; }
 interface Carrier { id: number; name: string; active: boolean; }
-interface BranchOption { id: number; name: string; active: boolean; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -106,7 +107,10 @@ export default function RoutesPage() {
   const [assignmentForm, setAssignmentForm] = useState({ driver_id: "", vehicle_id: "" });
   const [assignmentDriverQuery, setAssignmentDriverQuery] = useState("");
   const [assignmentVehicleQuery, setAssignmentVehicleQuery] = useState("");
+  const [assignmentOptions, setAssignmentOptions] = useState<AssignmentOptions | null>(null);
   const [form, setForm] = useState({ codigo_ut: "", route_date: "", origin_name: "", origin_address: "", driver_id: "", vehicle_id: "" });
+  const [formDriverQuery, setFormDriverQuery] = useState("");
+  const [formVehicleQuery, setFormVehicleQuery] = useState("");
   const [error, setError] = useState("");
   const [importOpen, setImportOpen] = useState(false);
 
@@ -353,6 +357,8 @@ export default function RoutesPage() {
   function startNew() {
     setError("");
     setForm({ codigo_ut: "", route_date: new Date().toISOString().slice(0, 10), origin_name: "", origin_address: "", driver_id: "", vehicle_id: "" });
+    setFormDriverQuery("");
+    setFormVehicleQuery("");
     setEditing("new");
   }
 
@@ -366,11 +372,17 @@ export default function RoutesPage() {
       driver_id: route.driver_id ? String(route.driver_id) : "",
       vehicle_id: route.vehicle_id ? String(route.vehicle_id) : "",
     });
+    setFormDriverQuery(drivers.find((driver) => driver.id === route.driver_id)?.name ?? "");
+    setFormVehicleQuery(vehicles.find((vehicle) => vehicle.id === route.vehicle_id)?.plate ?? "");
     setEditing(route.id);
   }
 
   function startAssignment(route: RouteItem) {
     setError("");
+    setAssignmentOptions(null);
+    api.get<AssignmentOptions>(`/routes/${route.id}/assignment-options`)
+      .then((response) => setAssignmentOptions(response.data))
+      .catch(() => setError("Não foi possível carregar os recursos liberados para esta rota."));
     setAssignmentForm({ driver_id: route.driver_id ? String(route.driver_id) : "", vehicle_id: route.vehicle_id ? String(route.vehicle_id) : "" });
     setAssignmentDriverQuery(drivers.find((driver) => driver.id === route.driver_id)?.name ?? "");
     setAssignmentVehicleQuery(vehicles.find((vehicle) => vehicle.id === route.vehicle_id)?.plate ?? "");
@@ -380,6 +392,7 @@ export default function RoutesPage() {
   async function saveAssignment(e: React.FormEvent) {
     e.preventDefault();
     if (!assigning) return;
+    if ((assignmentDriverQuery.trim() && !assignmentForm.driver_id) || (assignmentVehicleQuery.trim() && !assignmentForm.vehicle_id)) return;
     setError("");
     try {
       await api.put(`/routes/${assigning.id}/assignment`, {
@@ -392,6 +405,7 @@ export default function RoutesPage() {
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
+    if ((formDriverQuery.trim() && !form.driver_id) || (formVehicleQuery.trim() && !form.vehicle_id)) return;
     setError("");
     const payload = {
       codigo_ut: form.codigo_ut.trim() || `PROVISORIA-${Date.now()}`,
@@ -522,29 +536,27 @@ export default function RoutesPage() {
             </label>
             <label className="field">
               <span>{t("route.origin")}</span>
-              <input className="input" value={form.origin_name} onChange={(e) => setForm({ ...form, origin_name: e.target.value })} />
+              <RouteOriginSelect className="input" address={form.origin_address}
+                onSelect={origin => setForm(current => ({ ...current, origin_name: origin.name, origin_address: origin.address }))} />
             </label>
             <label className="field">
               <span>{t("rd.address")}</span>
-              <input className="input" value={form.origin_address} onChange={(e) => setForm({ ...form, origin_address: e.target.value })} />
+              <input className="input" value={form.origin_address} onChange={(e) => setForm({ ...form, origin_name: "", origin_address: e.target.value })} />
+              <small>Endereço do CD usado como Marco 0. Se vier da planilha, ele será mantido.</small>
             </label>
-            <label className="field">
+            <label className="field assignment-combobox">
               <span>{t("route.driver")}</span>
-              <select className="input" value={form.driver_id} onChange={(e) => setForm({ ...form, driver_id: e.target.value })}>
-                <option value="">-</option>
-                {drivers.filter((d) => d.active).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
+              <SearchableAssignmentSelect value={form.driver_id} query={formDriverQuery} placeholder="Pesquise pelo nome do motorista" emptyLabel="Nenhum motorista encontrado." options={drivers.filter((driver) => driver.active).map((driver) => ({ id: driver.id, label: driver.name }))} required={false} onQueryChange={(query, selectedId) => { setFormDriverQuery(query); setForm((current) => ({ ...current, driver_id: selectedId })); }} />
+              {formDriverQuery.trim() && !form.driver_id && <small>Selecione um motorista cadastrado na lista.</small>}
             </label>
-            <label className="field">
+            <label className="field assignment-combobox">
               <span>{t("route.vehicle")}</span>
-              <select className="input" value={form.vehicle_id} onChange={(e) => setForm({ ...form, vehicle_id: e.target.value })}>
-                <option value="">-</option>
-                {vehicles.filter((v) => v.active).map((v) => <option key={v.id} value={v.id}>{v.plate}</option>)}
-              </select>
+              <SearchableAssignmentSelect value={form.vehicle_id} query={formVehicleQuery} placeholder="Pesquise pela placa do veículo" emptyLabel="Nenhum veículo encontrado." options={vehicles.filter((vehicle) => vehicle.active).map((vehicle) => ({ id: vehicle.id, label: vehicle.plate }))} required={false} onQueryChange={(query, selectedId) => { setFormVehicleQuery(query.toUpperCase()); setForm((current) => ({ ...current, vehicle_id: selectedId })); }} />
+              {formVehicleQuery.trim() && !form.vehicle_id && <small>Selecione um veículo cadastrado na lista.</small>}
             </label>
           </div>
           <div style={{ marginTop: 12 }}>
-            <button type="submit" className="btn-primary">{t("common.save")}</button>
+            <button type="submit" className="btn-primary" disabled={Boolean((formDriverQuery.trim() && !form.driver_id) || (formVehicleQuery.trim() && !form.vehicle_id))}>{t("common.save")}</button>
             <button type="button" className="btn-ghost" onClick={() => setEditing(null)}>{t("common.cancel")}</button>
           </div>
         </form>
@@ -562,7 +574,8 @@ export default function RoutesPage() {
                 query={assignmentDriverQuery}
                 placeholder="Pesquise pelo nome do motorista"
                 emptyLabel="Nenhum motorista encontrado."
-                options={drivers.filter((driver) => driver.active).map((driver) => ({ id: driver.id, label: driver.name }))}
+                required={false}
+                options={drivers.filter((driver) => driver.active && assignmentOptions?.driver_ids.includes(driver.id)).map((driver) => ({ id: driver.id, label: driver.name }))}
                 onQueryChange={(query, selectedId) => {
                   setAssignmentDriverQuery(query);
                   setAssignmentForm((current) => ({ ...current, driver_id: selectedId }));
@@ -577,7 +590,8 @@ export default function RoutesPage() {
                 query={assignmentVehicleQuery}
                 placeholder="Pesquise pela placa do veículo"
                 emptyLabel="Nenhum veículo encontrado."
-                options={vehicles.filter((vehicle) => vehicle.active).map((vehicle) => ({ id: vehicle.id, label: vehicle.plate }))}
+                required={false}
+                options={vehicles.filter((vehicle) => vehicle.active && assignmentOptions?.vehicle_ids.includes(vehicle.id)).map((vehicle) => ({ id: vehicle.id, label: vehicle.plate }))}
                 onQueryChange={(value, selectedId) => {
                   const query = value.toUpperCase();
                   setAssignmentVehicleQuery(query);
@@ -587,7 +601,7 @@ export default function RoutesPage() {
               {assignmentVehicleQuery && !assignmentForm.vehicle_id && <small>Selecione um veículo cadastrado na lista.</small>}
             </label>
             <small className="assignment-hint">Motorista e veículo podem ser atribuídos separadamente.</small>
-            <div className="modal-actions"><button type="button" className="btn-ghost" onClick={() => setAssigning(null)}>Cancelar</button><button type="submit" className="btn-primary">Confirmar escala</button></div>
+            <div className="modal-actions"><button type="button" className="btn-ghost" onClick={() => setAssigning(null)}>Cancelar</button><button type="submit" className="btn-primary" disabled={Boolean((assignmentDriverQuery.trim() && !assignmentForm.driver_id) || (assignmentVehicleQuery.trim() && !assignmentForm.vehicle_id))}>Confirmar escala</button></div>
           </form>
         </div>
       )}
@@ -1123,32 +1137,10 @@ interface ImportResult {
 
 function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImported: () => void | Promise<void> }) {
   const { t } = useTranslation();
-  const { user } = useAuth();
   const [file, setFile] = useState<File | null>(null);
-  const [branches, setBranches] = useState<BranchOption[]>([]);
-  const [branchId, setBranchId] = useState(user?.branch_id ? String(user.branch_id) : "");
-  const [loadingBranches, setLoadingBranches] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    let active = true;
-    api.get<BranchOption[]>("/branches").then(({ data }) => {
-      if (!active) return;
-      const available = data.filter((branch) => branch.active);
-      setBranches(available);
-      setBranchId((current) => {
-        if (current && available.some((branch) => String(branch.id) === current)) return current;
-        return available.length === 1 ? String(available[0].id) : "";
-      });
-    }).catch((err: any) => {
-      if (active) setError(err?.response?.data?.detail ?? "Não foi possível carregar as unidades disponíveis.");
-    }).finally(() => {
-      if (active) setLoadingBranches(false);
-    });
-    return () => { active = false; };
-  }, []);
 
   useEffect(() => {
     if (!result) return;
@@ -1157,10 +1149,9 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
   }, [result, onClose]);
 
   async function downloadTemplate() {
-    if (!branchId) return;
     setError("");
     try {
-      const { data } = await api.get("/routes-import/template.xlsx", { params: { branch_id: Number(branchId) }, responseType: "blob" });
+      const { data } = await api.get("/routes-import/template.xlsx", { responseType: "blob" });
       const url = URL.createObjectURL(data);
       const link = document.createElement("a");
       link.href = url;
@@ -1177,16 +1168,15 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
           // Resposta sem JSON: mantém a mensagem amigável abaixo.
         }
       }
-      setError(typeof detail === "string" ? detail : "Não foi possível baixar o modelo para esta unidade.");
+      setError(typeof detail === "string" ? detail : "Não foi possível baixar o modelo de importação.");
     }
   }
 
   async function upload() {
-    if (!file || !branchId) return;
+    if (!file) return;
     setUploading(true); setError(""); setResult(null);
     const payload = new FormData();
     payload.set("file", file);
-    payload.set("branch_id", branchId);
     try {
       const data = await importRoutes<ImportResult>(payload);
       if (!data) return;
@@ -1206,14 +1196,7 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
         <p style={{ color: "var(--muted)", fontSize: 13 }}>{result ? "Importação concluída. Esta janela fechará automaticamente em 3 segundos." : t("route.import_help")}</p>
         {error && <p className="modal-error">{error}</p>}
         {!result && <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <label className="field">
-            <span>Unidade da importação *</span>
-            <select className="input" value={branchId} disabled={loadingBranches || uploading} onChange={(event) => setBranchId(event.target.value)}>
-              <option value="">{loadingBranches ? "Carregando unidades…" : "Selecione a unidade"}</option>
-              {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
-            </select>
-          </label>
-          <button type="button" className="btn-ghost" onClick={downloadTemplate} disabled={!branchId || loadingBranches}>{t("route.import_download_template")}</button>
+          <button type="button" className="btn-ghost" onClick={downloadTemplate} disabled={uploading}>{t("route.import_download_template")}</button>
           <label className="upload-pill" htmlFor="routes-import-file">
             <input id="routes-import-file" type="file" accept=".xlsx,.xlsm,.csv"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
@@ -1233,7 +1216,7 @@ function ImportRoutesModal({ onClose, onImported }: { onClose: () => void; onImp
         <div className="modal-actions">
           {result ? <button autoFocus type="button" className="btn-primary" onClick={onClose}>OK</button> : <>
           <button type="button" className="btn-ghost" onClick={onClose} disabled={uploading}>{t("common.cancel")}</button>
-          <button type="button" className="btn-primary" onClick={upload} disabled={!file || !branchId || uploading}>
+          <button type="button" className="btn-primary" onClick={upload} disabled={!file || uploading}>
             {uploading ? t("route.import_uploading") : t("route.import_upload")}
           </button>
           </>}

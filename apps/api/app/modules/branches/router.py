@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import Role, has_all_environment_access, require_internal_permission, require_internal_roles, require_roles, require_same_tenant
-from app.db.models import Branch, CarrierBranch, CarrierUser, Driver, DriverBranch, Route, User, Vehicle
+from app.db.models import Branch, BranchApprovalPolicy, CarrierBranch, CarrierUser, Driver, DriverBranch, Route, User, Vehicle, VehicleBranch
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services.audit import log, log_update, snapshot
@@ -59,8 +59,14 @@ def create_branch(data: BranchIn, db: Session = Depends(get_db), actor: User = D
     branch = Branch(**data.model_dump(exclude={"tenant_id"}), tenant_id=tenant_id)
     db.add(branch)
     db.flush()
-    # Uma filial nova não herda transportadoras, motoristas ou veículos.
-    # Cada vínculo precisa ser liberado explicitamente pelo administrador.
+    # Cadastros da empresa sem transportadora atendem também a filial nova.
+    policy = db.scalar(select(BranchApprovalPolicy).where(BranchApprovalPolicy.branch_id == branch.id))
+    for driver_id in db.scalars(select(Driver.id).where(Driver.tenant_id == tenant_id, Driver.carrier_id.is_(None))).all():
+        db.add(DriverBranch(driver_id=driver_id, branch_id=branch.id,
+                            approval_status="pending" if policy and policy.require_driver_approval else "approved"))
+    for vehicle_id in db.scalars(select(Vehicle.id).where(Vehicle.tenant_id == tenant_id, Vehicle.carrier_id.is_(None))).all():
+        db.add(VehicleBranch(vehicle_id=vehicle_id, branch_id=branch.id,
+                             approval_status="pending" if policy and policy.require_vehicle_approval else "approved"))
     log(db, user_id=actor.id, action="create", entity="branch", entity_id=branch.id)
     db.commit()
     db.refresh(branch)

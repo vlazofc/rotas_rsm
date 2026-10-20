@@ -47,6 +47,28 @@ def _add_missing_columns() -> None:
         conn.execute(text("ALTER TABLE driver_branches ADD COLUMN IF NOT EXISTS reviewed_by_id INTEGER REFERENCES users(id)"))
         conn.execute(text("ALTER TABLE driver_branches ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ"))
         conn.execute(text("INSERT INTO driver_branches (driver_id, branch_id, active, approval_status) SELECT id, branch_id, TRUE, 'approved' FROM drivers ON CONFLICT (driver_id, branch_id) DO NOTHING"))
+        conn.execute(text("""
+            INSERT INTO driver_branches (driver_id, branch_id, active, approval_status)
+            SELECT d.id, b.id, TRUE,
+                   CASE WHEN COALESCE(p.require_driver_approval, FALSE) THEN 'pending' ELSE 'approved' END
+            FROM drivers d JOIN branches b ON b.tenant_id = d.tenant_id
+            LEFT JOIN branch_approval_policies p ON p.branch_id = b.id
+            WHERE d.carrier_id IS NULL OR EXISTS (
+                SELECT 1 FROM carrier_branches cb
+                WHERE cb.carrier_id = d.carrier_id AND cb.branch_id = b.id AND cb.active = TRUE)
+            ON CONFLICT (driver_id, branch_id) DO NOTHING
+        """))
+        conn.execute(text("""
+            INSERT INTO vehicle_branches (vehicle_id, branch_id, active, approval_status)
+            SELECT v.id, b.id, TRUE,
+                   CASE WHEN COALESCE(p.require_vehicle_approval, FALSE) THEN 'pending' ELSE 'approved' END
+            FROM vehicles v JOIN branches b ON b.tenant_id = v.tenant_id
+            LEFT JOIN branch_approval_policies p ON p.branch_id = b.id
+            WHERE v.carrier_id IS NULL OR EXISTS (
+                SELECT 1 FROM carrier_branches cb
+                WHERE cb.carrier_id = v.carrier_id AND cb.branch_id = b.id AND cb.active = TRUE)
+            ON CONFLICT (vehicle_id, branch_id) DO NOTHING
+        """))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_type VARCHAR(2) DEFAULT 'PJ'"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS trade_name VARCHAR(160)"))
         conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS state_registration VARCHAR(40)"))
@@ -406,17 +428,13 @@ DEFAULT_FAILURE_REASONS = [
 # Cada tipo tem o rótulo em pt-PT (label) e o equivalente em pt-BR (label_pt_br).
 DEFAULT_VEHICLE_TYPES = [
     ("van", "Furgão", "Van", 10),
-    ("ligeiro", "Veículo ligeiro de mercadorias", "Veículo leve de carga", 20),
-    ("vuc", "VUC", "VUC", 30),
-    ("toco", "Camião toco", "Caminhão toco", 40),
-    ("truck", "Camião truck", "Caminhão truck", 50),
-    ("bau", "Camião baú", "Caminhão baú", 60),
-    ("frigorifico", "Camião frigorífico", "Caminhão frigorífico", 70),
-    ("pesado_rigido", "Camião rígido", "Caminhão rígido", 80),
-    ("pesado_articulado", "Camião articulado (semi-reboque)", "Caminhão articulado (carreta)", 90),
-    ("porta_contentor", "Porta-contentores", "Porta-contêiner", 100),
-    ("moto", "Motociclo", "Motocicleta", 110),
-    ("outro", "Outro", "Outro", 999),
+    ("ligeiro", "Veículo ligeiro de mercadorias", "Passeio", 20),
+    ("vuc", "VUC", "Vuc", 30),
+    ("toco", "Camião toco", "Toco", 40),
+    ("truck", "Camião truck", "Truck", 50),
+    ("frigorifico", "Camião frigorífico", "Refrigerado", 60),
+    ("pesado_articulado", "Camião articulado (semi-reboque)", "Carreta", 70),
+    ("moto", "Motociclo", "Moto", 80),
 ]
 
 
@@ -442,7 +460,7 @@ DEFAULT_CHECKLIST_ITEMS = [
 ]
 
 _INIT_DB_LOCK_KEY = 727384910  # chave arbitrária para o advisory lock abaixo.
-_BOOTSTRAP_VERSION = "2026-09-25.branch-default-origin-v4"
+_BOOTSTRAP_VERSION = "2026-10-01.resource-all-branches-v1"
 
 
 def init_db() -> None:
@@ -545,8 +563,16 @@ def _init_db_locked() -> None:
             vtype = db.scalar(select(VehicleType).where(VehicleType.code == code))
             if vtype is None:
                 db.add(VehicleType(code=code, label=label, label_pt_br=label_pt_br, sort_order=order))
-            elif vtype.label_pt_br is None:
+            else:
                 vtype.label_pt_br = label_pt_br
+                vtype.sort_order = order
+                vtype.active = True
+        # Tipos antigos permanecem para preservar os veículos já vinculados,
+        # mas deixam de aparecer como opções de cadastro.
+        active_vehicle_codes = {code for code, _, _, _ in DEFAULT_VEHICLE_TYPES}
+        for vtype in db.scalars(select(VehicleType).where(VehicleType.active.is_(True))).all():
+            if vtype.code not in active_vehicle_codes:
+                vtype.active = False
 
         for code, label, label_pt_br, category, required, order in DEFAULT_CHECKLIST_ITEMS:
             citem = db.scalar(select(ChecklistTemplateItem).where(ChecklistTemplateItem.code == code))

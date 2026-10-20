@@ -29,10 +29,32 @@ ALLOWED_EXTENSIONS = (".xlsx", ".xlsm", ".csv")
 
 
 def _import_carrier_id(db: Session, user: User) -> int | None:
+    acting_carrier_id = getattr(user, "acting_carrier_id", None)
+    if user.role == Role.ADMIN_GLOBAL.value and acting_carrier_id is not None:
+        return acting_carrier_id
     return db.scalar(select(CarrierUser.carrier_id).where(
         CarrierUser.user_id == user.id,
         CarrierUser.active.is_(True),
     ))
+
+
+def _accessible_import_branches(db: Session, user: User) -> list[Branch]:
+    """Lista somente filiais ativas dentro do escopo efetivo do usuário."""
+    carrier_id = _import_carrier_id(db, user)
+    stmt = select(Branch).where(Branch.active.is_(True)).order_by(Branch.name, Branch.id)
+    if carrier_id is not None:
+        stmt = stmt.join(CarrierBranch, CarrierBranch.branch_id == Branch.id).where(
+            CarrierBranch.carrier_id == carrier_id,
+            CarrierBranch.active.is_(True),
+        )
+    branches: list[Branch] = []
+    for branch in db.scalars(stmt).unique().all():
+        try:
+            require_branch_access(db, user, branch.id)
+        except HTTPException:
+            continue
+        branches.append(branch)
+    return branches
 
 
 def _resolve_import_branch(db: Session, user: User, requested_branch_id: int | None = None) -> int:
@@ -94,18 +116,30 @@ class ImportResult(BaseModel):
 
 @router.get("/template.xlsx", dependencies=[Depends(_MANAGER)])
 def download_template(branch_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    branch_id = _resolve_import_branch(db, user, branch_id)
+    branches = _accessible_import_branches(db, user)
+    if branch_id is not None:
+        branch = require_branch_access(db, user, branch_id)
+        if branch.id not in {item.id for item in branches}:
+            raise HTTPException(status_code=403, detail="Filial fora do escopo disponível para importação.")
+        branches = [branch]
+    if not branches:
+        raise HTTPException(status_code=409, detail="Nenhuma filial ativa disponível para importação.")
+    branch_ids = [branch.id for branch in branches]
     carrier_id = _import_carrier_id(db, user)
     carriers_query = (
         select(Carrier.id, Carrier.name)
         .join(CarrierBranch, CarrierBranch.carrier_id == Carrier.id)
-        .where(CarrierBranch.branch_id == branch_id, CarrierBranch.active.is_(True), Carrier.active.is_(True))
+        .where(CarrierBranch.branch_id.in_(branch_ids), CarrierBranch.active.is_(True), Carrier.active.is_(True))
+        .distinct()
         .order_by(Carrier.name)
     )
     if carrier_id is not None:
         carriers_query = carriers_query.where(Carrier.id == carrier_id)
     carriers = db.execute(carriers_query).all()
-    output = build_jm_template_xlsx([(row.id, row.name) for row in carriers])
+    output = build_jm_template_xlsx(
+        [(row.id, row.name) for row in carriers],
+        [(branch.id, branch.name) for branch in branches],
+    )
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -118,7 +152,6 @@ async def upload_routes(file: UploadFile = File(...), branch_id: int | None = Fo
     filename = file.filename or ""
     if not filename.lower().endswith(ALLOWED_EXTENSIONS):
         raise HTTPException(status_code=415, detail="Envie um arquivo .xlsx ou .csv.")
-    branch_id = _resolve_import_branch(db, user, branch_id)
     forced_carrier_id = _import_carrier_id(db, user)
     data = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
     if len(data) > settings.max_upload_mb * 1024 * 1024:
@@ -126,10 +159,19 @@ async def upload_routes(file: UploadFile = File(...), branch_id: int | None = Fo
     try:
         source = io.BytesIO(data)
         if filename.lower().endswith((".xlsx", ".xlsm")) and is_adimax_workbook(source):
+            branch_id = _resolve_import_branch(db, user, branch_id)
             stats = import_adimax_routes(source, branch_id=branch_id, confirmed=confirm_overwrite, user_id=user.id, forced_carrier_id=forced_carrier_id)
         elif filename.lower().endswith((".xlsx", ".xlsm")) and is_jm_load_workbook(source):
-            stats = import_jm_loads(source, branch_id=branch_id, confirmed=confirm_overwrite, user_id=user.id, forced_carrier_id=forced_carrier_id)
+            branches = _accessible_import_branches(db, user)
+            stats = import_jm_loads(
+                source,
+                allowed_branch_ids={branch.id for branch in branches},
+                confirmed=confirm_overwrite,
+                user_id=user.id,
+                forced_carrier_id=forced_carrier_id,
+            )
         else:
+            branch_id = _resolve_import_branch(db, user, branch_id)
             stats = import_generic_routes(source, filename, branch_id=branch_id, confirmed=confirm_overwrite, user_id=user.id, forced_carrier_id=forced_carrier_id)
     except ImportConfirmationRequired as exc:
         raise HTTPException(status_code=409, detail={

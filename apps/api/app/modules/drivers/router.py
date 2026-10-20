@@ -122,29 +122,24 @@ def _out(db:Session,driver:Driver,config:DriverSettings)->DriverOut:
     return DriverOut.model_validate({**driver.__dict__,"branch_ids":branch_ids,"document_url":storage.get_presigned_url(driver.document_attachment.bucket,driver.document_attachment.storage_key) if driver.document_attachment else None,"cnh_url":storage.get_presigned_url(driver.cnh_attachment.bucket,driver.cnh_attachment.storage_key) if driver.cnh_attachment else None,"cnh_status":_deadline_status(driver.cnh_expiry_date,config.cnh_alert_days),"antt_status":_deadline_status(driver.antt_expiry_date,config.antt_alert_days,optional=not bool(driver.antt_number)),"registration_due_date":renewal,"registration_status":_deadline_status(renewal,config.registration_alert_days)})
 
 def _sync_branches(db:Session,driver:Driver,_branch_ids:list[int],_actor:User)->None:
-    # A disponibilidade é explícita: estar na transportadora não libera o
-    # motorista automaticamente em todas as filiais atuais ou futuras.
+    # O cadastro fica disponível em todas as filiais atendidas pela transportadora.
     primary=db.get(Branch,driver.branch_id)
     if primary is None or primary.tenant_id!=driver.tenant_id:
         raise HTTPException(422,"Filial principal inválida para a empresa do motorista.")
-    ids=list(dict.fromkeys(_branch_ids or [driver.branch_id]))
-    if driver.branch_id not in ids:ids.insert(0,driver.branch_id)
-    branches=db.scalars(select(Branch).where(Branch.id.in_(ids))).all()
-    if len(branches)!=len(ids) or any(branch.tenant_id!=driver.tenant_id for branch in branches):
-        raise HTTPException(422,"Uma ou mais filiais não pertencem à empresa do motorista.")
+    branches=db.scalars(select(Branch).where(Branch.tenant_id==driver.tenant_id)).all()
+    ids=[branch.id for branch in branches]
     if driver.carrier_id is not None:
         enabled=set(db.scalars(select(CarrierBranch.branch_id).where(CarrierBranch.carrier_id==driver.carrier_id,CarrierBranch.active.is_(True))).all())
-        if any(branch_id not in enabled for branch_id in ids):
-            raise HTTPException(422,"A transportadora não está habilitada em uma das filiais selecionadas.")
-    db.query(DriverBranch).filter(DriverBranch.driver_id==driver.id).delete(synchronize_session=False)
+        ids=[branch_id for branch_id in ids if branch_id in enabled]
+    existing={row.branch_id for row in db.scalars(select(DriverBranch).where(DriverBranch.driver_id==driver.id)).all()}
     policies={row.branch_id:row for row in db.scalars(select(BranchApprovalPolicy).where(BranchApprovalPolicy.branch_id.in_(ids))).all()}
     db.add_all([DriverBranch(
         driver_id=driver.id,
         branch_id=branch_id,
         approval_status="pending" if policies.get(branch_id) and policies[branch_id].require_driver_approval else "approved",
-    ) for branch_id in ids])
+    ) for branch_id in ids if branch_id not in existing])
 
-def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | None, *, driver_id: int | None = None) -> None:
+def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | None, *, driver_id: int | None = None, carrier_id: int | None = None) -> None:
     if user_id is None:
         return
     linked_user = db.get(User, user_id)
@@ -152,6 +147,10 @@ def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | Non
         raise HTTPException(status_code=422, detail="Usuário não pertence à empresa do motorista.")
     if linked_user.role != Role.MOTORISTA.value:
         raise HTTPException(status_code=422, detail="Selecione um usuário com perfil motorista.")
+    if carrier_id is not None:
+        membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user_id, CarrierUser.active.is_(True)))
+        if membership is not None and membership.carrier_id != carrier_id:
+            raise HTTPException(status_code=403, detail="Usuário pertence a outra transportadora.")
     existing = db.scalar(select(Driver).where(Driver.user_id == user_id, Driver.id != (driver_id or -1)))
     if existing is not None:
         raise HTTPException(status_code=409, detail="Este acesso já está vinculado a outro motorista.")
@@ -202,7 +201,7 @@ def create_driver(data: DriverIn, db: Session = Depends(get_db), actor: User = D
         carrier = db.get(Carrier, data.carrier_id)
         if carrier is None or carrier.tenant_id != branch.tenant_id:
             raise HTTPException(status_code=422, detail="Transportadora não pertence à empresa da filial.")
-    _validate_linked_user(db, data.user_id, branch.tenant_id)
+    _validate_linked_user(db, data.user_id, branch.tenant_id, carrier_id=membership.carrier_id if membership else None)
     payload=data.model_dump(exclude={"branch_ids"})
     driver = Driver(tenant_id=branch.tenant_id, **payload)
     db.add(driver)
@@ -261,7 +260,7 @@ def update_driver(driver_id: int, data: DriverUpdate,
         if carrier is None or carrier.tenant_id != driver.tenant_id:
             raise HTTPException(status_code=422, detail="Transportadora não pertence à empresa do motorista.")
     if "user_id" in updates:
-        _validate_linked_user(db, data.user_id, driver.tenant_id, driver_id=driver.id)
+        _validate_linked_user(db, data.user_id, driver.tenant_id, driver_id=driver.id, carrier_id=membership.carrier_id if membership else None)
     before = snapshot(driver, list(updates))
     for field, value in updates.items():
         setattr(driver, field, value)

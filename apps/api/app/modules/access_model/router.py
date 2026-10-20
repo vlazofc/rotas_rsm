@@ -145,6 +145,17 @@ def enable_carrier_branch(carrier_id: int, branch_id: int, db: Session = Depends
         db.add(link)
     else:
         link.active = True
+    policy = _policy(db, branch_id)
+    existing_drivers = set(db.scalars(select(DriverBranch.driver_id).where(DriverBranch.branch_id == branch_id)).all())
+    existing_vehicles = set(db.scalars(select(VehicleBranch.vehicle_id).where(VehicleBranch.branch_id == branch_id)).all())
+    db.add_all([DriverBranch(driver_id=driver_id, branch_id=branch_id,
+                             approval_status="pending" if policy.require_driver_approval else "approved")
+                for driver_id in db.scalars(select(Driver.id).where(Driver.carrier_id == carrier_id)).all()
+                if driver_id not in existing_drivers])
+    db.add_all([VehicleBranch(vehicle_id=vehicle_id, branch_id=branch_id,
+                              approval_status="pending" if policy.require_vehicle_approval else "approved")
+                for vehicle_id in db.scalars(select(Vehicle.id).where(Vehicle.carrier_id == carrier_id)).all()
+                if vehicle_id not in existing_vehicles])
     db.commit()
     return {"carrier_id": carrier_id, "branch_id": branch_id, "active": True}
 

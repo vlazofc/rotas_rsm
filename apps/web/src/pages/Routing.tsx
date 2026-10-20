@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import RouteMap from "../components/RouteMap";
+import RouteOriginSelect from "../components/RouteOriginSelect";
 import api from "../services/api";
 import { importRoutes } from "../services/importRoutes";
 import { useAuth } from "../context/AuthContext";
@@ -25,7 +26,6 @@ export default function Routing() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [originAddress, setOriginAddress] = useState("");
   const [newStop, setNewStop] = useState({ customer_name: "", customer_address: "", city: "" });
   const [observation,setObservation]=useState("");
   const [mapOpen, setMapOpen] = useState(true);
@@ -63,7 +63,6 @@ export default function Routing() {
   }
   useEffect(() => { void reload(); api.get("/drivers").then((r) => setDrivers(r.data)); api.get("/vehicles").then((r) => setVehicles(r.data)); }, []);
   const selected = filteredRoutes.find((route) => route.id === selectedId) ?? filteredRoutes[0] ?? null;
-  useEffect(() => { setOriginAddress(selected?.origin_address ?? ""); }, [selected?.id, selected?.origin_address]);
   const totals = useMemo(() => ({ routes: openRoutes.length, stops: openRoutes.reduce((sum, route) => sum + route.stops.length, 0), optimized: openRoutes.filter((route) => route.routing_status === "optimized").length, pending: openRoutes.filter((route) => route.routing_status !== "optimized").length }), [openRoutes]);
 
   async function downloadTemplate() {
@@ -125,10 +124,10 @@ export default function Routing() {
     try { await api.put(`/routes/${selected.id}/assignment`, { driver_id: field === "driver_id" ? (value ? Number(value) : null) : selected.driver_id ?? null, vehicle_id: field === "vehicle_id" ? (value ? Number(value) : null) : selected.vehicle_id ?? null }); await reload(selected.id); }
     catch (err: any) { setError(err?.response?.data?.detail ?? "Não foi possível salvar a atribuição."); }
   }
-  async function saveOrigin() {
-    if (!selected || !originAddress.trim()) return;
+  async function saveOrigin(origin: { name: string; address: string }) {
+    if (!selected) return;
     setBusy(true); setError("");
-    try { await api.put(`/routes/${selected.id}`, { origin_address: originAddress.trim() }); await api.post(`/routes/${selected.id}/refresh-map`); await reload(selected.id); window.setTimeout(() => void reload(), 5000); setMessage("Ponto de partida salvo. O mapa está sendo atualizado em segundo plano."); }
+    try { await api.put(`/routes/${selected.id}`, { origin_name: origin.name, origin_address: origin.address }); await api.post(`/routes/${selected.id}/refresh-map`); await reload(selected.id); window.setTimeout(() => void reload(), 5000); setMessage("Marco 0 salvo. O mapa está sendo atualizado em segundo plano."); }
     catch (err: any) { setError(err?.response?.data?.detail ?? "Não foi possível salvar o ponto de partida."); }
     finally { setBusy(false); }
   }
@@ -187,7 +186,7 @@ export default function Routing() {
           </div>
           {hasRole("admin_global", "gestor_brasil", "operador_logistico", "torre_controle") && <><div className="routing-admin routing-admin-monitor"><strong>Dados operacionais</strong><label>Qtd. pernoites<input type="number" min="0" className="input" defaultValue={selected.overnight_count ?? 0} onBlur={(e)=>updateAdministrative({overnight_count:Number(e.target.value)||0,overnight:Number(e.target.value)>0})}/></label><label>Qtd. diárias<input type="number" min="0" step="1" className="input" defaultValue={selected.daily_count ?? 0} onBlur={(e)=>updateAdministrative({daily_count:Number(e.target.value)||0})}/></label><label>Número do CT-e<input className="input" defaultValue={selected.cte_number??""} onBlur={(e)=>updateAdministrative({cte_number:e.target.value||null})}/></label></div><div className={`routing-observations ${selected.observations?.length ? "has-history" : "is-empty"}`}><div className="routing-observation-compose"><label>Nova observação<textarea className="input" value={observation} onChange={e=>setObservation(e.target.value)} placeholder="Registre uma nova informação operacional"/></label><button className="btn-primary" disabled={!observation.trim()} onClick={addObservation}>Registrar observação</button></div><div className="routing-observation-history">{[...(selected.observations??[])].reverse().map(item=><article key={item.id}><b>#{item.sequence}</b><span>{item.text}<small>{new Date(item.created_at).toLocaleString("pt-BR")}</small></span></article>)}{!selected.observations?.length&&<small>Nenhuma observação registrada.</small>}</div></div></>}
           <section className={`routing-map-card ${mapOpen ? "is-open" : "is-collapsed"}`}><header><div><strong>Mapa da rota</strong><small>Trajeto e sequência das paradas</small></div><button type="button" className="btn-ghost" onClick={() => setMapOpen((open) => !open)}>{mapOpen ? "Recolher mapa" : "Exibir mapa"}</button></header>{mapOpen && <div className="routing-map"><RouteMap routes={[selected]} selectedRouteId={selected.id} onSelectRoute={setSelectedId} /></div>}</section>
-          <div className="routing-stops"><h3>Sequência original e sugestão</h3><article className="routing-origin-stop"><b>0</b><span><strong>Carregamento no CD</strong><small>{selected.origin_address || "Origem não informada — preencha a coluna V da planilha."}</small><small>Ponto inicial do cálculo de distância e tempo até as entregas.</small></span></article>{[...selected.stops].sort((a,b) => a.sequence-b.sequence).map((stop) => <article key={stop.id}><b>{stop.spreadsheet_sequence ?? stop.sequence}</b><span><strong>{stop.customer_name}</strong><small>{[stop.customer_address, stop.city].filter(Boolean).join(" · ") || "Endereço não informado"}{stop.order_number ? ` · Pedido ${stop.order_number}` : ""}</small>{stop.optimized_sequence != null && <em>Sugestão: parada {stop.optimized_sequence}</em>}{(stop.customer_notes || stop.customer_notes_2) && <small>Obs. cliente: {[stop.customer_notes, stop.customer_notes_2].filter(Boolean).join(" · ")}</small>}</span>{hasRole("admin_global", "gestor_brasil") && <span className="routing-docs"><input className="input" placeholder="Nota fiscal" defaultValue={stop.invoice_number ?? ""} onBlur={(e) => updateStopAdministrative(stop,{invoice_number:e.target.value||null})}/><input className="input" placeholder="CTE" defaultValue={stop.cte_number ?? ""} onBlur={(e) => updateStopAdministrative(stop,{cte_number:e.target.value||null})}/></span>}</article>)}</div>
+          <div className="routing-stops"><h3>Sequência original e sugestão</h3><article className="routing-origin-stop"><b>0</b><span><strong>Carregamento no CD</strong><small>{selected.origin_address || "Origem não informada — selecione Salto ou Barueri."}</small><small>Ponto inicial do cálculo de distância e tempo até as entregas.</small>{hasRole("admin_global", "gestor_brasil", "operador_logistico") && <RouteOriginSelect className="input" address={selected.origin_address ?? ""} disabled={busy} onSelect={origin => void saveOrigin(origin)} />}</span></article>{[...selected.stops].sort((a,b) => a.sequence-b.sequence).map((stop) => <article key={stop.id}><b>{stop.spreadsheet_sequence ?? stop.sequence}</b><span><strong>{stop.customer_name}</strong><small>{[stop.customer_address, stop.city].filter(Boolean).join(" · ") || "Endereço não informado"}{stop.order_number ? ` · Pedido ${stop.order_number}` : ""}</small>{stop.optimized_sequence != null && <em>Sugestão: parada {stop.optimized_sequence}</em>}{(stop.customer_notes || stop.customer_notes_2) && <small>Obs. cliente: {[stop.customer_notes, stop.customer_notes_2].filter(Boolean).join(" · ")}</small>}</span>{hasRole("admin_global", "gestor_brasil") && <span className="routing-docs"><input className="input" placeholder="Nota fiscal" defaultValue={stop.invoice_number ?? ""} onBlur={(e) => updateStopAdministrative(stop,{invoice_number:e.target.value||null})}/><input className="input" placeholder="CTE" defaultValue={stop.cte_number ?? ""} onBlur={(e) => updateStopAdministrative(stop,{cte_number:e.target.value||null})}/></span>}</article>)}</div>
         </> : <div className="routing-empty">Selecione uma rota para revisar o planejamento.</div>}
       </main>
     </section>

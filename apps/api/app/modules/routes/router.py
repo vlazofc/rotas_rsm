@@ -19,7 +19,7 @@ from app.core.permissions import (
     ROLE_EQUIVALENTS, Role, has_all_branches_policy, has_all_environment_access,
     require_branch_access, require_internal_permission, require_internal_roles, require_roles, scope_by_branch, user_branch_ids,
 )
-from app.db.models import Attachment, Branch, BranchApprovalPolicy, Carrier, CarrierBranch, CarrierMaster, CarrierUser, DeliveryFailureReason, DockSession, Driver, DriverBranch, Route, RouteCarrierChange, RouteOccurrence, RouteOccurrenceEvent, RouteObservation, RouteStop, RouteStopOperation, Checkin, User, Vehicle, VehicleBranch
+from app.db.models import Attachment, Branch, BranchApprovalPolicy, Carrier, CarrierBranch, CarrierMaster, CarrierUser, DeliveryFailureReason, DockSession, Driver, DriverBranch, Route, RouteCarrierChange, RouteOccurrence, RouteOccurrenceEvent, RouteObservation, RouteStop, RouteStopOperation, Checkin, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.modules.routes.schemas import (
@@ -82,7 +82,7 @@ def _validate_route_resources(
     vehicle_id: int | None,
     carrier_id: int | None = None,
 ) -> None:
-    """Impede relacionamentos cruzados entre filiais/tenants numa rota."""
+    """Restringe recursos à empresa e transportadora; filial limita só motoristas."""
     route_branch = db.get(Branch, branch_id)
     if route_branch is None:
         raise HTTPException(status_code=422, detail="Filial da rota não encontrada.")
@@ -107,10 +107,6 @@ def _validate_route_resources(
             raise HTTPException(status_code=422, detail="Veículo não pertence à transportadora da rota.")
         if not vehicle.active or vehicle.blocked:
             raise HTTPException(status_code=422, detail="Veículo inativo ou bloqueado não pode ser escalado.")
-        availability = db.scalar(select(VehicleBranch).where(VehicleBranch.vehicle_id == vehicle_id, VehicleBranch.branch_id == branch_id))
-        approval_required = bool(policy and policy.require_vehicle_approval)
-        if availability is None or not availability.active or (approval_required and availability.approval_status != "approved"):
-            raise HTTPException(status_code=422, detail="Veículo não está liberado para esta filial.")
 def _validate_route_carrier(db: Session, branch_id: int, carrier_id: int | None) -> Carrier:
     if carrier_id is None:
         raise HTTPException(422, detail="Selecione a transportadora executora da rota.")
@@ -127,6 +123,19 @@ def _validate_route_carrier(db: Session, branch_id: int, carrier_id: int | None)
 
 def _carrier_membership(db: Session, user: User) -> CarrierUser | None:
     return db.scalar(select(CarrierUser).where(CarrierUser.user_id == user.id, CarrierUser.active.is_(True)))
+
+
+def _is_active_carrier_master(db: Session, user: User) -> bool:
+    if user.role != Role.GESTOR_BRASIL.value:
+        return False
+    return db.scalar(select(CarrierMaster.id).join(
+        CarrierUser,
+        (CarrierUser.user_id == CarrierMaster.user_id) & (CarrierUser.carrier_id == CarrierMaster.carrier_id),
+    ).where(
+        CarrierMaster.user_id == user.id,
+        CarrierMaster.active.is_(True),
+        CarrierUser.active.is_(True),
+    )) is not None
 
 
 def _require_route_editor(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
@@ -264,6 +273,8 @@ def _driver_ids(db: Session, user: User) -> list[int]:
 
 def _guard_driver_assignment(db: Session, user: User, route: Route) -> None:
     """Uma conta vinculada a motorista só opera rotas atribuídas ao vínculo."""
+    if user.role == Role.ADMIN_GLOBAL.value or _is_active_carrier_master(db, user):
+        return
     driver_ids = _driver_ids(db, user)
     if not driver_ids and user.role != Role.MOTORISTA.value:
         return
@@ -275,9 +286,9 @@ def _require_route_operation_access(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> User:
-    """Autoriza equipe operacional ou qualquer login ligado a um motorista."""
+    """Autoriza equipe operacional e master ativo, dentro do escopo da rota."""
     effective_role = ROLE_EQUIVALENTS.get(user.role, user.role)
-    if user.role == Role.ADMIN_GLOBAL.value or effective_role == Role.OPERADOR_LOGISTICO.value:
+    if user.role == Role.ADMIN_GLOBAL.value or effective_role == Role.OPERADOR_LOGISTICO.value or _is_active_carrier_master(db, user):
         return user
     if user.role == Role.MOTORISTA.value or _driver_ids(db, user):
         return user
@@ -526,13 +537,15 @@ def update_route(route_id: int, data: RouteUpdate,
     require_branch_access(db, user, route.branch_id); _guard_carrier_route_access(db, user, route)
     _guard_planning_change(route, user)
     updates = data.model_dump(exclude_unset=True)
-    _validate_route_resources(
-        db,
-        route.branch_id,
-        updates.get("driver_id", route.driver_id),
-        updates.get("vehicle_id", route.vehicle_id),
-        route.carrier_id,
-    )
+    driver_changed = "driver_id" in updates and updates["driver_id"] != route.driver_id
+    vehicle_changed = "vehicle_id" in updates and updates["vehicle_id"] != route.vehicle_id
+    if driver_changed or vehicle_changed:
+        _validate_route_resources(
+            db, route.branch_id,
+            updates["driver_id"] if driver_changed else None,
+            updates["vehicle_id"] if vehicle_changed else None,
+            route.carrier_id,
+        )
     before = snapshot(route, list(updates))
     for field, value in updates.items():
         setattr(route, field, value)
@@ -725,6 +738,31 @@ def assign_route(route_id: int, data: RouteAssignmentIn,
                before=before, obj=route, updates=updates)
     db.commit()
     return _load(db, route.id)
+
+
+@router.get("/{route_id}/assignment-options", dependencies=[_EDITOR])
+def route_assignment_options(route_id: int,
+                             db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Recursos que podem ser escalados para esta rota neste momento."""
+    route = _load(db, route_id)
+    require_branch_access(db, user, route.branch_id)
+    _guard_carrier_route_access(db, user, route)
+    branch = db.get(Branch, route.branch_id)
+    policy = db.scalar(select(BranchApprovalPolicy).where(BranchApprovalPolicy.branch_id == route.branch_id))
+    driver_availability = select(DriverBranch.driver_id).where(
+        DriverBranch.branch_id == route.branch_id, DriverBranch.active.is_(True))
+    if policy and policy.require_driver_approval:
+        driver_availability = driver_availability.where(DriverBranch.approval_status == "approved")
+    drivers = select(Driver.id).where(
+        Driver.tenant_id == branch.tenant_id, Driver.active.is_(True),
+        Driver.blocked.is_(False), Driver.id.in_(driver_availability))
+    vehicles = select(Vehicle.id).where(
+        Vehicle.tenant_id == branch.tenant_id, Vehicle.active.is_(True),
+        Vehicle.blocked.is_(False))
+    if route.carrier_id is not None:
+        drivers = drivers.where(Driver.carrier_id == route.carrier_id)
+        vehicles = vehicles.where(Vehicle.carrier_id == route.carrier_id)
+    return {"driver_ids": db.scalars(drivers).all(), "vehicle_ids": db.scalars(vehicles).all()}
 
 
 @router.post("/{route_id}/change-carrier", response_model=RouteOut,

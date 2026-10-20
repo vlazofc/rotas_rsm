@@ -1,7 +1,7 @@
 from datetime import date
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -12,10 +12,12 @@ from app.db.models import (
 )
 from app.db.session import Base
 from app.modules.notifications.router import _tenant_rows
-from app.modules.routes.router import _require_route_editor, assign_route
+from app.modules.drivers.router import _validate_linked_user
+from app.modules.routes.router import _require_route_editor, _require_route_operation_access, assign_route, force_start_route
 from app.modules.routes.schemas import RouteAssignmentIn
-from app.modules.users.router import _guard_carrier_assignment
-from app.modules.vehicles.router import list_owners, list_requests
+from app.modules.users.router import _guard_carrier_assignment, UserUpdate, change_user_status, list_users, reset_password, update_user
+from app.services.entity_status import StatusChangeIn
+from app.modules.vehicles.router import OwnerIn, create_owner, list_owners, list_requests
 
 
 @pytest.fixture
@@ -65,6 +67,50 @@ def test_carrier_master_cannot_assign_privileged_role_or_custom_permissions(carr
     assert permission_error.value.status_code == 403
 
 
+def test_carrier_master_manages_legacy_driver_access_only_for_own_carrier(carrier_scope):
+    db, master, membership, *_ = carrier_scope
+    own = User(name="Motorista Alfa", email="alfa@acesso.adimax.com.br", login="motorista.alfa",
+               role="motorista", tenant_id=master.tenant_id, branch_id=master.branch_id)
+    other = User(name="Motorista Beta", email="beta@acesso.adimax.com.br", login="motorista.beta",
+                 role="motorista", tenant_id=master.tenant_id, branch_id=master.branch_id)
+    db.add_all([own, other]); db.flush()
+    db.add_all([
+        Driver(name=own.name, tenant_id=master.tenant_id, branch_id=master.branch_id,
+               carrier_id=membership.carrier_id, user_id=own.id),
+        Driver(name=other.name, tenant_id=master.tenant_id, branch_id=master.branch_id,
+               carrier_id=membership.carrier_id + 1, user_id=other.id),
+    ])
+    db.commit()
+
+    listed = list_users(db=db, actor=master)
+    assert own.id in {user.id for user in listed}
+    assert other.id not in {user.id for user in listed}
+    assert next(user for user in listed if user.id == own.id).carrier_id == membership.carrier_id
+
+    updated = update_user(own.id, UserUpdate(login="novo.alfa", name="Motorista Alfa"), db=db, actor=master)
+    assert updated.login == "novo.alfa"
+    reset = reset_password(own.id, Response(), db=db, actor=master)
+    assert reset.must_change_password and reset.initial_password
+    status = change_user_status(own.id, StatusChangeIn(action="deactivate", reason="Teste de acesso"), db=db, actor=master)
+    assert status.active is False
+    with pytest.raises(HTTPException) as denied:
+        update_user(other.id, UserUpdate(login="novo.beta"), db=db, actor=master)
+    assert denied.value.status_code == 403
+    with pytest.raises(HTTPException) as denied_reset:
+        reset_password(other.id, Response(), db=db, actor=master)
+    assert denied_reset.value.status_code == 403
+    with pytest.raises(HTTPException) as denied_status:
+        change_user_status(other.id, StatusChangeIn(action="deactivate", reason="Teste de acesso"), db=db, actor=master)
+    assert denied_status.value.status_code == 403
+
+    db.add(CarrierUser(carrier_id=membership.carrier_id + 1, user_id=own.id, active=True))
+    db.commit()
+    assert own.id not in {user.id for user in list_users(db=db, actor=master)}
+    with pytest.raises(HTTPException) as denied_link:
+        _validate_linked_user(db, own.id, master.tenant_id, carrier_id=membership.carrier_id)
+    assert denied_link.value.status_code == 403
+
+
 def test_live_alert_source_is_scoped_to_carrier(carrier_scope):
     db, master, _, _, route_a, occurrence_a = carrier_scope
     assert [row.id for row in _tenant_rows(db, Route, master)] == [route_a.id]
@@ -77,6 +123,36 @@ def test_vehicle_owners_and_requests_are_scoped_to_carrier(carrier_scope):
     requests = list_requests(db=db, actor=master)
     assert len(requests) == 1
     assert requests[0].plate == "AAA1A11"
+
+
+def test_carrier_owner_search_reaches_records_after_first_250(carrier_scope):
+    db, master, membership, *_ = carrier_scope
+    db.add_all([
+        VehicleOwner(tenant_id=master.tenant_id, carrier_id=membership.carrier_id,
+                     name=f"Owner {index:03d}", document=f"{index:011d}")
+        for index in range(251)
+    ])
+    db.flush()
+    found = list_owners(q="Owner 250", db=db, actor=master)
+    assert len(found) == 1
+    assert found[0].name == "Owner 250"
+
+
+def test_carrier_can_register_own_owner_when_document_exists_in_other_scope(carrier_scope):
+    db, master, membership, *_ = carrier_scope
+    db.add(VehicleOwner(tenant_id=master.tenant_id, name="Empresa interna", document="16784574000138"))
+    db.commit()
+    created = create_owner(
+        OwnerIn(name="J M Transportes", document="16.784.574/0001-38", person_type="pessoa_juridica"),
+        db=db, actor=master,
+    )
+    assert created.carrier_id == membership.carrier_id
+    with pytest.raises(HTTPException) as duplicate_error:
+        create_owner(
+            OwnerIn(name="J M Transportes", document="16.784.574/0001-38", person_type="pessoa_juridica"),
+            db=db, actor=master,
+        )
+    assert duplicate_error.value.status_code == 409
 
 
 def test_carrier_master_can_assign_only_own_resources(carrier_scope):
@@ -109,4 +185,23 @@ def test_carrier_master_can_assign_only_own_resources(carrier_scope):
     master.role = "operador_logistico"
     with pytest.raises(HTTPException) as error:
         _require_route_editor(master, db)
+    assert error.value.status_code == 403
+
+
+def test_carrier_master_can_force_start_only_own_route(carrier_scope):
+    db, master, membership, _, route, _ = carrier_scope
+    assert _require_route_operation_access(master, db) is master
+    started = force_start_route(route.id, db, master)
+    assert started.status == "em_rota"
+    assert started.dock_session.departure_cd_at is not None
+
+    foreign_route = db.scalar(select(Route).where(Route.codigo_ut == "BETA"))
+    with pytest.raises(HTTPException) as error:
+        force_start_route(foreign_route.id, db, master)
+    assert error.value.status_code == 403
+
+    membership.active = False
+    db.flush()
+    with pytest.raises(HTTPException) as error:
+        _require_route_operation_access(master, db)
     assert error.value.status_code == 403

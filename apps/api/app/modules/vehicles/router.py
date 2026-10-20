@@ -8,8 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_permission, require_roles, require_same_tenant
-from app.db.models import Attachment, Carrier, CarrierBranch, CarrierUser, CarrierVehicleLink, Route, Tenant, User, Vehicle, VehicleChangeRequest, VehicleOwner, VehicleType
+from app.core.permissions import Role, has_all_environment_access, require_permission, require_roles, require_same_tenant
+from app.db.models import Attachment, Branch, BranchApprovalPolicy, Carrier, CarrierBranch, CarrierUser, CarrierVehicleLink, Route, Tenant, User, Vehicle, VehicleBranch, VehicleChangeRequest, VehicleOwner, VehicleType
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
 from app.services import storage
@@ -23,6 +23,7 @@ PROTECTED = {"renavam", "vehicle_type_id", "axles"}
 
 class OwnerIn(BaseModel):
     name: str; document: str; person_type: str = "pessoa_fisica"; phone: str | None = None; email: str | None = None; address: str | None = None
+    carrier_id: int | None = None
     bank_name: str | None = None; bank_agency: str | None = None; bank_account: str | None = None
     bank_account_type: str | None = None; pix_key_type: str | None = None; pix_key: str | None = None
 
@@ -79,6 +80,37 @@ def _vehicle_out(db: Session, vehicle: Vehicle) -> VehicleOut:
               "age": date.today().year - vehicle.manufacture_year if vehicle.manufacture_year else None}
     return VehicleOut.model_validate(values)
 
+
+def _sync_vehicle_branches(db: Session, vehicle: Vehicle) -> None:
+    branches = db.scalars(select(Branch.id).where(Branch.tenant_id == vehicle.tenant_id, Branch.active.is_(True))).all()
+    if vehicle.carrier_id is not None:
+        enabled = set(db.scalars(select(CarrierBranch.branch_id).where(
+            CarrierBranch.carrier_id == vehicle.carrier_id, CarrierBranch.active.is_(True))).all())
+        branches = [branch_id for branch_id in branches if branch_id in enabled]
+    existing = {row.branch_id: row for row in db.scalars(select(VehicleBranch).where(VehicleBranch.vehicle_id == vehicle.id)).all()}
+    for row in existing.values():
+        if row.approval_reason == "ANTT pendente":
+            row.active = True
+            row.approval_reason = None
+    policies = {row.branch_id: row for row in db.scalars(select(BranchApprovalPolicy).where(
+        BranchApprovalPolicy.branch_id.in_(branches))).all()}
+    db.add_all([VehicleBranch(vehicle_id=vehicle.id, branch_id=branch_id,
+                              approval_status="pending" if policies.get(branch_id) and policies[branch_id].require_vehicle_approval else "approved")
+                for branch_id in branches if branch_id not in existing])
+
+
+def _registration_branch(db: Session, tenant_id: int | None, carrier_id: int | None) -> Branch:
+    if tenant_id is None:
+        raise HTTPException(422, "Empresa não identificada para o cadastro do veículo.")
+    stmt = select(Branch).where(Branch.tenant_id == tenant_id, Branch.active.is_(True))
+    if carrier_id is not None:
+        stmt = stmt.join(CarrierBranch, CarrierBranch.branch_id == Branch.id).where(
+            CarrierBranch.carrier_id == carrier_id, CarrierBranch.active.is_(True))
+    branch = db.scalar(stmt.order_by(Branch.id).limit(1))
+    if branch is None:
+        raise HTTPException(422, "Nenhuma filial ativa está habilitada para este cadastro.")
+    return branch
+
 def _request_out(db: Session, row: VehicleChangeRequest) -> ChangeOut:
     vehicle=db.get(Vehicle,row.vehicle_id); requester=db.get(User,row.requested_by_id); reviewer=db.get(User,row.reviewed_by_id) if row.reviewed_by_id else None
     return ChangeOut.model_validate({**row.__dict__,"plate":vehicle.plate,"requested_by_name":requester.name,"reviewed_by_name":reviewer.name if reviewer else None})
@@ -110,7 +142,6 @@ def _validate_receiver(db:Session,tenant_id:int|None,ownership_type:str,receiver
         raise HTTPException(409,"Este veículo já possui responsável. Desvincule o atual, salve, e depois vincule o novo.")
     carrier=db.get(Carrier,carrier_id)
     if carrier is None or carrier.tenant_id!=tenant_id or not carrier.active: raise HTTPException(422,"Arrendatário/beneficiário inválido ou inativo.")
-    if not (carrier.antt_number or "").strip(): raise HTTPException(422,"O terceiro selecionado não possui ANTT/RNTRC liberada.")
     return carrier
 
 def _sync_receiver_link(db:Session,vehicle:Vehicle,carrier:Carrier|None,actor:User)->None:
@@ -120,15 +151,15 @@ def _sync_receiver_link(db:Session,vehicle:Vehicle,carrier:Carrier|None,actor:Us
     db.flush()
     vehicle.carrier_id=carrier.id if carrier else None
     vehicle.freight_receiver_type="terceiro" if carrier else "proprietario"
-    if carrier: db.add(CarrierVehicleLink(carrier_id=carrier.id,vehicle_id=vehicle.id,antt_authorized=True,freight_beneficiary=True))
+    if carrier: db.add(CarrierVehicleLink(carrier_id=carrier.id,vehicle_id=vehicle.id,antt_authorized=bool((vehicle.antt_number or "").strip() and (carrier.antt_number or "").strip()),freight_beneficiary=True))
     if old_id != vehicle.carrier_id:
         log(db,user_id=actor.id,action="update",entity="vehicle_freight_receiver",entity_id=vehicle.id,detail=f'carrier_id: "{old_id or "-"}" -> "{vehicle.carrier_id or "proprietário"}"')
 
 def _company_owner(db:Session,tenant_id:int|None)->tuple[VehicleOwner,Tenant]:
     tenant=db.get(Tenant,tenant_id) if tenant_id else None
     if tenant is None:raise HTTPException(422,"Empresa contratante não identificada.")
-    if not tenant.document or not tenant.legal_name or not tenant.address or not tenant.antt_number:
-        raise HTTPException(422,"Complete CNPJ, razão social, endereço e ANTT em Configuração > Dados da empresa antes de cadastrar a frota própria.")
+    if not tenant.document or not tenant.legal_name or not tenant.address:
+        raise HTTPException(422,"Complete CNPJ, razão social e endereço em Configuração > Dados da empresa antes de cadastrar a frota própria.")
     owner=db.scalar(select(VehicleOwner).where(VehicleOwner.tenant_id==tenant.id,VehicleOwner.is_tenant_company.is_(True)))
     values={"name":tenant.legal_name,"document":tenant.document,"person_type":"pessoa_juridica","phone":tenant.phone,"email":tenant.email,"address":", ".join(filter(None,[tenant.address,tenant.city,tenant.state])),"active":True,"is_tenant_company":True}
     if owner is None:
@@ -152,7 +183,7 @@ def list_owners(q:str|None=None,db:Session=Depends(get_db),actor:User=Depends(ge
     stmt=select(VehicleOwner).where(VehicleOwner.tenant_id==actor.tenant_id)
     membership=db.scalar(select(CarrierUser).where(CarrierUser.user_id==actor.id,CarrierUser.active.is_(True)))
     if membership is not None:stmt=stmt.where(VehicleOwner.carrier_id==membership.carrier_id)
-    rows=db.scalars(stmt.order_by(VehicleOwner.name).limit(250)).all()
+    rows=db.scalars(stmt.order_by(VehicleOwner.name)).all()
     if q and len(q.strip())>=3:
         term=q.strip().casefold()
         rows=[row for row in rows if term in row.name.casefold() or term in row.document.casefold()]
@@ -165,11 +196,17 @@ def create_owner(data:OwnerIn,db:Session=Depends(get_db),actor:User=Depends(get_
     document="".join(char for char in data.document if char.isdigit())
     expected=11 if data.person_type=="pessoa_fisica" else 14
     if len(document)!=expected:raise HTTPException(422,f"Informe um {'CPF' if expected==11 else 'CNPJ'} válido com {expected} dígitos.")
-    duplicate=db.scalar(select(VehicleOwner).where(VehicleOwner.tenant_id==actor.tenant_id,VehicleOwner.document==document))
-    if duplicate:raise HTTPException(409,"Já existe um proprietário com este CPF/CNPJ.")
-    payload=data.model_dump();payload["document"]=document
     membership=db.scalar(select(CarrierUser).where(CarrierUser.user_id==actor.id,CarrierUser.active.is_(True)))
-    row=VehicleOwner(tenant_id=actor.tenant_id,carrier_id=membership.carrier_id if membership else None,**payload);db.add(row);db.flush();log(db,user_id=actor.id,action="create",entity="vehicle_owner",entity_id=row.id);db.commit();db.refresh(row);return row
+    carrier_id=membership.carrier_id if membership else data.carrier_id
+    if membership is not None and data.carrier_id not in (None, membership.carrier_id): raise HTTPException(403,"Transportadora diferente da sua.")
+    if membership is None and carrier_id is not None:
+        carrier=db.get(Carrier,carrier_id)
+        if actor.role not in {Role.ADMIN_GLOBAL.value,Role.GESTOR_BRASIL.value} or carrier is None or carrier.tenant_id!=actor.tenant_id:
+            raise HTTPException(403,"Transportadora inválida para o proprietário.")
+    duplicate=db.scalar(select(VehicleOwner).where(VehicleOwner.tenant_id==actor.tenant_id,VehicleOwner.carrier_id==carrier_id,VehicleOwner.document==document))
+    if duplicate:raise HTTPException(409,"Já existe um proprietário com este CPF/CNPJ.")
+    payload=data.model_dump(exclude={"carrier_id"});payload["document"]=document
+    row=VehicleOwner(tenant_id=actor.tenant_id,carrier_id=carrier_id,**payload);db.add(row);db.flush();log(db,user_id=actor.id,action="create",entity="vehicle_owner",entity_id=row.id);db.commit();db.refresh(row);return row
 
 @router.put("/owners/{owner_id}",response_model=OwnerOut,dependencies=[Depends(_STAFF)])
 def update_owner(owner_id:int,data:OwnerIn,db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
@@ -177,7 +214,7 @@ def update_owner(owner_id:int,data:OwnerIn,db:Session=Depends(get_db),actor:User
     if row is None:raise HTTPException(404,"Proprietário não encontrado.")
     _guard_carrier_owner(db,actor,row)
     require_same_tenant(actor,row.tenant_id);before=snapshot(row,list(data.model_fields))
-    for key,value in data.model_dump().items():setattr(row,key,value)
+    for key,value in data.model_dump(exclude={"carrier_id"}).items():setattr(row,key,value)
     log_update(db,user_id=actor.id,entity="vehicle_owner",entity_id=row.id,before=before,obj=row,updates=data.model_dump());db.commit();db.refresh(row);return row
 
 @router.post("/owners/{owner_id}/status",response_model=OwnerOut,dependencies=[Depends(_STAFF)])
@@ -204,7 +241,7 @@ def decide_request(request_id:int,data:DecisionIn,db:Session=Depends(get_db),act
     row=db.get(VehicleChangeRequest,request_id)
     if row is None or row.tenant_id!=actor.tenant_id:raise HTTPException(404,"Solicitação não encontrada.")
     if row.status!="pending":raise HTTPException(409,"Solicitação já decidida.")
-    vehicle=db.get(Vehicle,row.vehicle_id);_guard_carrier_vehicle(db,actor,vehicle);require_branch_access(db,actor,vehicle.branch_id)
+    vehicle=db.get(Vehicle,row.vehicle_id);_guard_carrier_vehicle(db,actor,vehicle);require_same_tenant(actor,vehicle.tenant_id)
     if data.decision=="approved":vehicle.renavam=row.requested_renavam;vehicle.vehicle_type_id=row.requested_vehicle_type_id;vehicle.axles=row.requested_axles
     row.status=data.decision;row.reviewed_by_id=actor.id;row.reviewed_at=datetime.now(timezone.utc);row.decision_note=data.note
     log(db,user_id=actor.id,action=data.decision,entity="vehicle_change_request",entity_id=row.id,detail=data.note);db.commit();db.refresh(row);return _request_out(db,row)
@@ -218,24 +255,24 @@ def list_vehicles(db:Session=Depends(get_db),actor:User=Depends(get_current_user
     return [_vehicle_out(db,row) for row in db.scalars(stmt).all()]
 
 @router.post("/with-crlv",response_model=VehicleOut,dependencies=[Depends(_STAFF)])
-async def create_vehicle(branch_id:int=Form(...),plate:str=Form(...),renavam:str=Form(...),chassis:str=Form(...),owner_id:int|None=Form(None),vehicle_type_id:int=Form(...),axles:int=Form(...),crlv:UploadFile=File(...),description:str|None=Form(None),registry_state:str|None=Form(None),brand:str|None=Form(None),model:str|None=Form(None),manufacture_year:int|None=Form(None),model_year:int|None=Form(None),color:str|None=Form(None),fuel:str|None=Form(None),crlv_expiry_date:date|None=Form(None),length_m:float|None=Form(None),width_m:float|None=Form(None),height_m:float|None=Form(None),gross_weight_kg:float|None=Form(None),temperature_controlled:bool=Form(False),ownership_type:str=Form("proprio"),freight_receiver_type:str=Form("proprietario"),carrier_id:int|None=Form(None),antt_number:str|None=Form(None),antt_expiry_date:date|None=Form(None),db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
-    branch=require_branch_access(db,actor,branch_id)
+async def create_vehicle(plate:str=Form(...),renavam:str=Form(...),chassis:str=Form(...),owner_id:int|None=Form(None),vehicle_type_id:int=Form(...),axles:int=Form(...),crlv:UploadFile=File(...),description:str|None=Form(None),registry_state:str|None=Form(None),brand:str|None=Form(None),model:str|None=Form(None),manufacture_year:int|None=Form(None),model_year:int|None=Form(None),color:str|None=Form(None),fuel:str|None=Form(None),crlv_expiry_date:date|None=Form(None),length_m:float|None=Form(None),width_m:float|None=Form(None),height_m:float|None=Form(None),gross_weight_kg:float|None=Form(None),temperature_controlled:bool=Form(False),ownership_type:str=Form("proprio"),freight_receiver_type:str=Form("proprietario"),carrier_id:int|None=Form(None),antt_number:str|None=Form(None),antt_expiry_date:date|None=Form(None),db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
     membership=db.scalar(select(CarrierUser).where(CarrierUser.user_id==actor.id,CarrierUser.active.is_(True)))
     if membership is not None:
-        if db.scalar(select(CarrierBranch).where(CarrierBranch.carrier_id==membership.carrier_id,CarrierBranch.branch_id==branch.id,CarrierBranch.active.is_(True))) is None:
-            raise HTTPException(403,"Filial não habilitada para a transportadora.")
         carrier_id=membership.carrier_id;ownership_type="agregado";freight_receiver_type="terceiro"
+    tenant_id=actor.tenant_id
+    if actor.role==Role.ADMIN_GLOBAL.value and carrier_id is not None:
+        carrier=db.get(Carrier,carrier_id)
+        if carrier is not None:tenant_id=carrier.tenant_id
+    branch=_registration_branch(db,tenant_id,carrier_id if ownership_type=="agregado" else None)
     if ownership_type not in {"proprio","agregado"}:raise HTTPException(422,"Vínculo do veículo inválido.")
     if ownership_type=="proprio":
         company_owner,tenant=_company_owner(db,branch.tenant_id);owner_id=company_owner.id;antt_number=tenant.antt_number;antt_expiry_date=tenant.antt_expiry_date;freight_receiver_type="proprietario";carrier_id=None
     _validate_owner(db,branch.tenant_id,owner_id)
     if membership is not None and owner_id is not None:
         _guard_carrier_owner(db,actor,db.get(VehicleOwner,owner_id))
-    if ownership_type=="agregado" and not owner_id:raise HTTPException(422,"Veículo agregado deve estar vinculado a um proprietário.")
-    if ownership_type=="agregado" and not (antt_number or "").strip():raise HTTPException(422,"Informe a ANTT vinculada ao veículo agregado.")
     receiver=_validate_receiver(db,branch.tenant_id,ownership_type,freight_receiver_type,carrier_id)
-    vehicle=Vehicle(tenant_id=branch.tenant_id,branch_id=branch_id,plate=plate.upper(),renavam=renavam,chassis=chassis.upper(),owner_id=owner_id,vehicle_type_id=vehicle_type_id,axles=axles,description=description,registry_state=registry_state,brand=brand,model=model,manufacture_year=manufacture_year,model_year=model_year,color=color,fuel=fuel,crlv_expiry_date=crlv_expiry_date,length_m=length_m,width_m=width_m,height_m=height_m,gross_weight_kg=gross_weight_kg,temperature_controlled=temperature_controlled,ownership_type=ownership_type,freight_receiver_type=freight_receiver_type,carrier_id=carrier_id,antt_number=antt_number,antt_expiry_date=antt_expiry_date)
-    db.add(vehicle);db.flush();_sync_receiver_link(db,vehicle,receiver,actor);attachment=await _save_crlv(crlv,branch_id,vehicle.id);db.add(attachment);db.flush();vehicle.crlv_attachment_id=attachment.id
+    vehicle=Vehicle(tenant_id=branch.tenant_id,branch_id=branch.id,plate=plate.upper(),renavam=renavam,chassis=chassis.upper(),owner_id=owner_id,vehicle_type_id=vehicle_type_id,axles=axles,description=description,registry_state=registry_state,brand=brand,model=model,manufacture_year=manufacture_year,model_year=model_year,color=color,fuel=fuel,crlv_expiry_date=crlv_expiry_date,length_m=length_m,width_m=width_m,height_m=height_m,gross_weight_kg=gross_weight_kg,temperature_controlled=temperature_controlled,ownership_type=ownership_type,freight_receiver_type=freight_receiver_type,carrier_id=carrier_id,antt_number=antt_number,antt_expiry_date=antt_expiry_date)
+    db.add(vehicle);db.flush();_sync_receiver_link(db,vehicle,receiver,actor);_sync_vehicle_branches(db,vehicle);attachment=await _save_crlv(crlv,branch.id,vehicle.id);db.add(attachment);db.flush();vehicle.crlv_attachment_id=attachment.id
     log(db,user_id=actor.id,action="create",entity="vehicle",entity_id=vehicle.id,detail="CRLV anexado");db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
 
 @router.post("/{vehicle_id}/change-request",response_model=ChangeOut,dependencies=[Depends(_STAFF)])
@@ -244,7 +281,7 @@ def request_change(vehicle_id:int,data:ChangeIn,db:Session=Depends(get_db),actor
     vehicle=db.get(Vehicle,vehicle_id)
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
     _guard_carrier_vehicle(db,actor,vehicle)
-    require_branch_access(db,actor,vehicle.branch_id)
+    require_same_tenant(actor,vehicle.tenant_id)
     row=VehicleChangeRequest(branch_id=vehicle.branch_id,vehicle_id=vehicle.id,requested_by_id=actor.id,reason=data.reason.strip(),requested_renavam=data.renavam,requested_vehicle_type_id=data.vehicle_type_id,requested_axles=data.axles,previous_renavam=vehicle.renavam,previous_vehicle_type_id=vehicle.vehicle_type_id,previous_axles=vehicle.axles)
     db.add(row);db.flush();log(db,user_id=actor.id,action="request_change",entity="vehicle",entity_id=vehicle.id,detail=data.reason);db.commit();db.refresh(row);return _request_out(db,row)
 
@@ -253,15 +290,13 @@ def update_vehicle(vehicle_id:int,data:VehicleUpdate,db:Session=Depends(get_db),
     vehicle=db.get(Vehicle,vehicle_id)
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
     membership=_guard_carrier_vehicle(db,actor,vehicle)
-    require_branch_access(db,actor,vehicle.branch_id);updates=data.model_dump(exclude_unset=True);reason=updates.pop("change_reason",None)
+    require_same_tenant(actor,vehicle.tenant_id);updates=data.model_dump(exclude_unset=True);reason=updates.pop("change_reason",None)
     if membership is not None:updates.update({"carrier_id":membership.carrier_id,"ownership_type":"agregado","freight_receiver_type":"terceiro"})
     if "active" in updates:raise HTTPException(422,"Use a ação de situação para ativar ou desativar o veículo.")
     ownership_type=updates.get("ownership_type",vehicle.ownership_type)
     if ownership_type not in {"proprio","agregado"}:raise HTTPException(422,"Vínculo do veículo inválido.")
     if ownership_type=="proprio":
         company_owner,tenant=_company_owner(db,vehicle.tenant_id);updates["owner_id"]=company_owner.id;updates["antt_number"]=tenant.antt_number;updates["antt_expiry_date"]=tenant.antt_expiry_date;updates["freight_receiver_type"]="proprietario";updates["carrier_id"]=None
-    if ownership_type=="agregado" and not updates.get("owner_id",vehicle.owner_id):raise HTTPException(422,"Veículo agregado deve estar vinculado a um proprietário.")
-    if ownership_type=="agregado" and not (updates.get("antt_number",vehicle.antt_number) or "").strip():raise HTTPException(422,"Informe a ANTT vinculada ao veículo agregado.")
     receiver_type=updates.get("freight_receiver_type",vehicle.freight_receiver_type)
     requested_carrier_id=updates.get("carrier_id",vehicle.carrier_id)
     receiver=_validate_receiver(db,vehicle.tenant_id,ownership_type,receiver_type,requested_carrier_id,vehicle)
@@ -275,6 +310,7 @@ def update_vehicle(vehicle_id:int,data:VehicleUpdate,db:Session=Depends(get_db),
         _guard_carrier_owner(db,actor,db.get(VehicleOwner,updates.get("owner_id",vehicle.owner_id)))
     for key,value in updates.items():setattr(vehicle,key,value)
     _sync_receiver_link(db,vehicle,receiver,actor)
+    _sync_vehicle_branches(db,vehicle)
     log_update(db,user_id=actor.id,entity="vehicle",entity_id=vehicle.id,before=before,obj=vehicle,updates=updates);db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
 
 @router.post("/{vehicle_id}/status",response_model=VehicleOut,dependencies=[Depends(_STAFF)])
@@ -282,7 +318,7 @@ def change_vehicle_status(vehicle_id:int,data:StatusChangeIn,db:Session=Depends(
     vehicle=db.get(Vehicle,vehicle_id)
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
     _guard_carrier_vehicle(db,actor,vehicle)
-    require_branch_access(db,actor,vehicle.branch_id);apply_status(db,obj=vehicle,data=data,user_id=actor.id,entity="vehicle");db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
+    require_same_tenant(actor,vehicle.tenant_id);apply_status(db,obj=vehicle,data=data,user_id=actor.id,entity="vehicle");db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
 
 @router.post("/{vehicle_id}/crlv",response_model=VehicleOut,dependencies=[Depends(_STAFF)])
 async def replace_crlv(vehicle_id:int,crlv:UploadFile=File(...),reason:str|None=Form(None),db:Session=Depends(get_db),actor:User=Depends(get_current_user)):
@@ -290,7 +326,7 @@ async def replace_crlv(vehicle_id:int,crlv:UploadFile=File(...),reason:str|None=
     if vehicle is None:raise HTTPException(404,"Veículo não encontrado.")
     _guard_carrier_vehicle(db,actor,vehicle)
     if actor.role not in {Role.ADMIN_GLOBAL.value,Role.GESTOR_BRASIL.value} and (not reason or len(reason.strip())<10):raise HTTPException(422,"Informe o motivo da substituição do CRLV com pelo menos 10 caracteres.")
-    require_branch_access(db,actor,vehicle.branch_id);attachment=await _save_crlv(crlv,vehicle.branch_id,vehicle.id);db.add(attachment);db.flush();vehicle.crlv_attachment_id=attachment.id
+    require_same_tenant(actor,vehicle.tenant_id);attachment=await _save_crlv(crlv,vehicle.branch_id,vehicle.id);db.add(attachment);db.flush();vehicle.crlv_attachment_id=attachment.id
     log(db,user_id=actor.id,action="replace_crlv",entity="vehicle",entity_id=vehicle.id,detail=reason);db.commit();db.refresh(vehicle);return _vehicle_out(db,vehicle)
 
 @router.delete("/{vehicle_id}",dependencies=[Depends(require_roles(Role.ADMIN_GLOBAL))])

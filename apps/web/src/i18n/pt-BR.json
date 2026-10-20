@@ -308,7 +308,7 @@
     "source_automatic": "Criada automaticamente (importação/SharePoint)",
     "source_manual": "Criada manualmente",
     "import": "Importar rotas",
-    "import_help": "Baixe o modelo, preencha uma linha por entrega e envie de volta — funciona para qualquer operação.",
+    "import_help": "Baixe o modelo, preencha a coluna Filial em cada entrega e envie o arquivo. As cargas serão direcionadas automaticamente para a unidade correspondente.",
     "import_download_template": "Baixar modelo (.xlsx)",
     "import_pick_file": "Escolher arquivo (.xlsx ou .csv)",
     "import_upload": "Importar",

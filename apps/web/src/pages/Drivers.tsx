@@ -42,7 +42,6 @@ type Settings = {
   registration_alert_days: number;
   statement_release_day: number;
 };
-type Branch = { id:number; name:string; tenant_id:number|null };
 type DriverAccess = { id:number; name:string; login?:string|null; tenant_id?:number|null; branch_id?:number|null; active:boolean; blocked:boolean; linked_driver_id?:number|null };
 const empty = {
   name: "",
@@ -93,7 +92,6 @@ export default function Drivers() {
     [query, setQuery] = useState(""),
     [status, setStatus] = useState(""),
     [error, setError] = useState("");
-  const [branches,setBranches]=useState<Branch[]>([]);
   const [driverAccesses,setDriverAccesses]=useState<DriverAccess[]>([]);
   const canDelete = hasRole("admin_global");
   const load = () =>
@@ -106,7 +104,6 @@ export default function Drivers() {
     });
   useEffect(() => {
     load().catch(() => {});
-    api.get<Branch[]>("/branches").then(response=>setBranches(response.data.filter(branch=>user?.tenant_id==null||branch.tenant_id===user.tenant_id))).catch(()=>setBranches([]));
     api.get<DriverAccess[]>("/drivers/access-options").then(response=>setDriverAccesses(response.data)).catch(()=>setDriverAccesses([]));
   }, []);
   const filtered = useMemo(
@@ -364,20 +361,7 @@ export default function Drivers() {
           >
             <h3>{editing === "new" ? "Novo motorista" : "Editar motorista"}</h3>
             <h4>Filiais onde pode atuar</h4>
-            <p className="page-subtitle">Selecione explicitamente as unidades autorizadas. Novas filiais não serão incluídas automaticamente.</p>
-            <div className="checkbox-grid">
-              {branches.filter(branch => user?.tenant_id == null || branch.tenant_id === user.tenant_id).map(branch => (
-                <label key={branch.id} className="check-row">
-                  <input type="checkbox" checked={form.branch_ids.includes(branch.id)} onChange={(event) => setForm({
-                    ...form,
-                    branch_ids: event.target.checked
-                      ? [...form.branch_ids, branch.id]
-                      : form.branch_ids.filter(id => id !== branch.id),
-                  })} />
-                  <span>{branch.name}</span>
-                </label>
-              ))}
-            </div>
+            <p className="page-subtitle">Disponível automaticamente em todas as filiais atendidas pela transportadora. Aprovações exigidas pela filial continuam necessárias.</p>
             <h4>Dados pessoais e contato</h4>
             <div className="form-grid">
               <Field label="Acesso no app do motorista">

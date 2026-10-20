@@ -8,6 +8,8 @@ import { applyTimemark } from "../services/timemark";
 import { useAuth } from "../context/AuthContext";
 import { usePolling } from "../hooks/usePolling";
 import SearchableAssignmentSelect from "../components/SearchableAssignmentSelect";
+import RouteOriginSelect from "../components/RouteOriginSelect";
+import { vehicleTypeLabel as displayVehicleTypeLabel } from "../utils/vehicleTypeLabel";
 
 const REFRESH_INTERVAL_MS = 20000;
 
@@ -60,6 +62,7 @@ interface RouteData {
 }
 interface Driver { id: number; name: string; employment_type?: "proprio" | "agregado"; daily_rate?: number | null; }
 interface Vehicle { id: number; plate: string; vehicle_type_code?: string | null; vehicle_type_label?: string | null; }
+interface AssignmentOptions { driver_ids: number[]; vehicle_ids: number[]; }
 interface Reason { id: number; code: string; label: string; label_pt_br?: string | null; active: boolean; }
 interface Carrier { id: number; name: string; document?: string | null; active: boolean; }
 
@@ -81,7 +84,8 @@ export default function RouteDetail() {
   const [route, setRoute] = useState<RouteData | null>(null);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-  const [vehicleTypes, setVehicleTypes] = useState<{code: string; label: string}[]>([]);
+  const [assignmentOptions, setAssignmentOptions] = useState<AssignmentOptions | null>(null);
+  const [vehicleTypes, setVehicleTypes] = useState<{code: string; label: string; label_pt_br?: string | null}[]>([]);
   const [reasons, setReasons] = useState<Reason[]>([]);
   const [carriers, setCarriers] = useState<Carrier[]>([]);
   const [changeCarrierOpen, setChangeCarrierOpen] = useState(false);
@@ -113,6 +117,7 @@ export default function RouteDetail() {
   const [editHeader, setEditHeader] = useState(false);
   const [header, setHeader] = useState({ origin_name: "", origin_address: "", route_date: "", driver_id: "", vehicle_id: "", status: "", status_justification: "", vehicle_requested: "", vehicle_sent: "", helper_assigned: false, tracked: false, driver_payment_amount: "", driver_payment_notes: "" });
   const [driverQuery, setDriverQuery] = useState("");
+  const [vehicleQuery, setVehicleQuery] = useState("");
   const [editingStop, setEditingStop] = useState<"new" | number | null>(null);
   const [stopForm, setStopForm] = useState({ ...EMPTY_STOP });
   const [error, setError] = useState("");
@@ -170,6 +175,14 @@ export default function RouteDetail() {
     api.get("/failure-reasons").then((r) => setReasons(r.data)).catch(() => {});
   }, [id]);
 
+  useEffect(() => {
+    if (!route) return;
+    setAssignmentOptions(null);
+    api.get<AssignmentOptions>(`/routes/${route.id}/assignment-options`)
+      .then((response) => setAssignmentOptions(response.data))
+      .catch(() => setAssignmentOptions(null));
+  }, [route?.id, route?.branch_id, route?.carrier_id]);
+
   // Mantém os dados da rota e das paradas atualizados sem exigir F5,
   // já que outros utilizadores (motorista, operador) podem alterar o status em paralelo.
   usePolling(reload, REFRESH_INTERVAL_MS);
@@ -209,6 +222,13 @@ export default function RouteDetail() {
     return fromOperations > 0 ? fromOperations : Number(s.pallets ?? 0);
   };
   const salvesenPalletsTotal = route.stops.reduce((sum, stop) => sum + salvesenPallets(stop), 0);
+  const vehicleTypeFor = (value: string | null | undefined) => vehicleTypes.find(type =>
+    type.label === value || type.label_pt_br === value || type.code === value ||
+    displayVehicleTypeLabel(type.label_pt_br || type.label) === displayVehicleTypeLabel(value));
+  const vehicleTypeLabel = (value: string | null | undefined) => {
+    const type = vehicleTypeFor(value);
+    return displayVehicleTypeLabel(type?.label_pt_br || type?.label || value);
+  };
   const formatQty = (value: number) => value ? new Intl.NumberFormat(i18n.language, { maximumFractionDigits: 2 }).format(value) : "—";
   const toggleOperations = (stopId: number) => {
     setExpandedOperations((current) => ({ ...current, [stopId]: !current[stopId] }));
@@ -216,6 +236,7 @@ export default function RouteDetail() {
 
   function startEditHeader() {
     setDriverQuery(drivers.find((driver) => driver.id === route!.driver_id)?.name ?? "");
+    setVehicleQuery(vehicles.find((vehicle) => vehicle.id === route!.vehicle_id)?.plate ?? "");
     setHeader({
       origin_name: route!.origin_name ?? "", origin_address: route!.origin_address ?? "",
       route_date: route!.route_date ?? "", driver_id: route!.driver_id ? String(route!.driver_id) : "",
@@ -229,13 +250,15 @@ export default function RouteDetail() {
   }
   async function saveHeader(e: React.FormEvent) {
     e.preventDefault(); setError("");
-    if (driverQuery.trim() && !header.driver_id) return;
+    if ((driverQuery.trim() && !header.driver_id) || (vehicleQuery.trim() && !header.vehicle_id)) return;
     try {
+      const driverId = header.driver_id ? Number(header.driver_id) : null;
+      const vehicleId = header.vehicle_id ? Number(header.vehicle_id) : null;
       await api.put(`/routes/${id}`, {
         origin_name: header.origin_name || null, origin_address: header.origin_address || null,
         route_date: header.route_date || null,
-        driver_id: header.driver_id ? Number(header.driver_id) : null,
-        vehicle_id: header.vehicle_id ? Number(header.vehicle_id) : null,
+        ...(driverId !== (route!.driver_id ?? null) ? { driver_id: driverId } : {}),
+        ...(vehicleId !== (route!.vehicle_id ?? null) ? { vehicle_id: vehicleId } : {}),
         vehicle_requested: header.vehicle_requested || null,
         vehicle_sent: header.vehicle_sent || null,
         helper_assigned: header.helper_assigned,
@@ -254,7 +277,10 @@ export default function RouteDetail() {
         });
       }
       setEditHeader(false); reload();
-    } catch (err: any) { setError(err?.response?.data?.detail ?? t("rd.save_error")); }
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      setError(typeof detail === "string" ? detail : t("rd.save_error"));
+    }
   }
 
   async function dock(action: string) {
@@ -480,9 +506,9 @@ export default function RouteDetail() {
   };
   const activeReasons = reasons.filter((r) => r.active);
   const isAdmin = user?.role === "admin_global";
-  const canRelease = hasRole("operador_logistico");
+  const canRelease = hasRole("operador_logistico") || Boolean(user?.is_carrier_master);
   const canClose = hasRole("gestor_brasil", "operador_logistico");
-  const canOperateDock = hasRole("motorista", "operador_logistico");
+  const canOperateDock = hasRole("motorista", "operador_logistico") || Boolean(user?.is_carrier_master);
   const canEditRoute = isAdmin || Boolean(user?.is_carrier_master);
   const isRouteDeparted = Boolean(route.dock_session?.departure_cd_at || route.status === "em_rota" || route.status === "finalizada");
   const isStopClosed = (s: Stop) => s.status === "entregue" || s.status === "falha" || s.status === "devolvido";
@@ -545,8 +571,8 @@ export default function RouteDetail() {
             <Info label="Transportadora executora" value={carriers.find(item => item.id === route.carrier_id)?.name ?? (route.carrier_assignment_status === "pending_carrier" ? "Pendente de correção" : "—")} />
             {(route.vehicle_requested || route.vehicle_sent) && (
               <>
-                <Info label={t("rd.vehicle_requested")} value={route.vehicle_requested ?? "—"} />
-                <Info label={t("rd.vehicle_sent")} value={route.vehicle_sent ?? "—"} />
+                <Info label={t("rd.vehicle_requested")} value={vehicleTypeLabel(route.vehicle_requested)} />
+                <Info label={t("rd.vehicle_sent")} value={vehicleTypeLabel(route.vehicle_sent)} />
               </>
             )}
             {route.helper_assigned != null && (
@@ -576,17 +602,17 @@ export default function RouteDetail() {
             <div style={infoGrid}>
               <Field label={t("route.date")}><input type="date" style={input} value={header.route_date}
                 onChange={(e) => setHeader({ ...header, route_date: e.target.value })} /></Field>
-              <Field label={t("route.origin")}><input style={input} value={header.origin_name}
-                onChange={(e) => setHeader({ ...header, origin_name: e.target.value })} /></Field>
+              <Field label={t("route.origin")}><RouteOriginSelect address={header.origin_address}
+                onSelect={origin => setHeader(current => ({ ...current, origin_name: origin.name, origin_address: origin.address }))} /></Field>
               <Field label={t("rd.address")}><input style={input} value={header.origin_address}
-                onChange={(e) => setHeader({ ...header, origin_address: e.target.value })} /></Field>
+                onChange={(e) => setHeader({ ...header, origin_name: "", origin_address: e.target.value })} /></Field>
               <Field label={t("route.driver")}>
                 <SearchableAssignmentSelect
                   value={header.driver_id}
                   query={driverQuery}
                   placeholder="Busque pelo nome do motorista"
                   emptyLabel="Nenhum motorista encontrado."
-                  options={drivers.map((driver) => ({ id: driver.id, label: driver.name }))}
+                  options={drivers.filter((driver) => assignmentOptions?.driver_ids.includes(driver.id)).map((driver) => ({ id: driver.id, label: driver.name }))}
                   required={false}
                   onQueryChange={(query, selectedId) => {
                     setDriverQuery(query);
@@ -596,20 +622,28 @@ export default function RouteDetail() {
                 {driverQuery.trim() && !header.driver_id && <small style={{ color: "#b42318" }}>Selecione um motorista da lista.</small>}
               </Field>
               <Field label={t("route.vehicle")}>
-                <select style={input} value={header.vehicle_id} onChange={(e) => {
-                  const vehicleId = e.target.value;
-                  const v = vehicles.find((v) => String(v.id) === vehicleId);
-                  setHeader({ ...header, vehicle_id: vehicleId, vehicle_sent: v?.vehicle_type_label || v?.vehicle_type_code || header.vehicle_sent });
-                }}>
-                  <option value="">—</option>
-                  {vehicles.map((v) => <option key={v.id} value={v.id}>{v.plate}</option>)}
-                </select>
+                <SearchableAssignmentSelect
+                  value={header.vehicle_id}
+                  query={vehicleQuery}
+                  placeholder="Busque pela placa do veículo"
+                  emptyLabel="Nenhum veículo encontrado."
+                  options={vehicles.filter((vehicle) => assignmentOptions?.vehicle_ids.includes(vehicle.id)).map((vehicle) => ({ id: vehicle.id, label: vehicle.plate }))}
+                  required={false}
+                  onQueryChange={(query, selectedId) => {
+                    setVehicleQuery(query.toUpperCase());
+                    const vehicle = vehicles.find((item) => String(item.id) === selectedId);
+                    setHeader((current) => ({ ...current, vehicle_id: selectedId,
+                      vehicle_sent: vehicle?.vehicle_type_label || vehicle?.vehicle_type_code || current.vehicle_sent }));
+                  }}
+                />
+                {vehicleQuery.trim() && !header.vehicle_id && <small style={{ color: "#b42318" }}>Selecione um veículo da lista.</small>}
               </Field>
+              {assignmentOptions && !assignmentOptions.driver_ids.length && <small>Nenhum motorista está liberado para a transportadora e filial desta rota.</small>}
               {(["vehicle_requested", "vehicle_sent"] as const).map(field => <Field key={field} label={t(`rd.${field}`)}>
-                <select style={input} value={header[field]} onChange={e => setHeader({ ...header, [field]: e.target.value })}>
+                <select style={input} value={vehicleTypeFor(header[field])?.label ?? header[field]} onChange={e => setHeader({ ...header, [field]: e.target.value })}>
                   <option value="">Selecione o tipo de veículo</option>
-                  {header[field] && !vehicleTypes.some(type => type.label === header[field]) && <option value={header[field]}>{header[field]}</option>}
-                  {vehicleTypes.map(type => <option key={type.code} value={type.label}>{type.label}</option>)}
+                  {header[field] && !vehicleTypeFor(header[field]) && <option value={header[field]}>{displayVehicleTypeLabel(header[field])}</option>}
+                  {vehicleTypes.map(type => <option key={type.code} value={type.label}>{displayVehicleTypeLabel(type.label_pt_br || type.label)}</option>)}
                 </select>
               </Field>)}
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--muted)" }}>
@@ -639,7 +673,7 @@ export default function RouteDetail() {
               )}
             </div>
             <div style={{ marginTop: 12 }}>
-              <button type="submit" style={primary} disabled={Boolean(driverQuery.trim() && !header.driver_id)}>{t("common.save")}</button>
+              <button type="submit" style={primary} disabled={Boolean((driverQuery.trim() && !header.driver_id) || (vehicleQuery.trim() && !header.vehicle_id))}>{t("common.save")}</button>
               <button type="button" style={ghost} onClick={() => setEditHeader(false)}>{t("common.cancel")}</button>
             </div>
           </form>

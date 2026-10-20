@@ -7,11 +7,11 @@ Este documento é a referência reutilizável para sistemas com administração 
 - A Adimax é a administração central. Colaboradores recebem filiais explícitas ou a capacidade especial `todas as filiais, inclusive futuras`.
 - A transportadora tem um cadastro único por CNPJ e se relaciona com N filiais por `carrier_branches`.
 - Um master pertence à transportadora, nunca à filial. Existem no máximo três masters ativos por transportadora.
-- Motoristas e veículos pertencem à transportadora e sua disponibilidade é decidida separadamente por filial.
+- Motoristas ficam disponíveis nas filiais da empresa atendidas pela transportadora, inclusive novas filiais habilitadas depois. A filial pode exigir aprovação ou bloquear o vínculo do motorista. Um veículo ativo e não bloqueado pode ser escalado em qualquer filial da mesma empresa e transportadora, sem depender do vínculo `vehicle_branches`.
 - `active/blocked` representa a situação cadastral global. `approval_status` representa somente a decisão daquela filial. Um estado nunca reativa o outro.
 - O login do motorista (`users`) e seu cadastro operacional (`drivers`) continuam separados e ligados por ID.
 - O motorista autenticado visualiza somente rotas cujo `driver_id` corresponde ao cadastro ligado ao seu `user_id`; pertencer a uma filial não concede acesso a rotas.
-- Criar uma filial não propaga automaticamente transportadoras, motoristas, veículos ou colaboradores.
+- Criar uma filial não propaga transportadoras nem colaboradores. Cadastros sem transportadora são liberados na nova filial; os de transportadora são liberados quando ela passa a atender a filial.
 - Alterar uma política de aprovação não interrompe viagens em andamento.
 
 ## Modelo
@@ -43,7 +43,7 @@ erDiagram
 
 ## Regra de elegibilidade
 
-Um motorista ou veículo pode ser escalado em uma filial somente quando todas as condições forem verdadeiras:
+Um motorista pode ser escalado em uma filial somente quando todas as condições forem verdadeiras:
 
 ```text
 cadastro ativo
@@ -52,6 +52,8 @@ AND transportadora ativa na filial
 AND disponibilidade ativa na filial
 AND (aprovação não exigida OR status = approved)
 ```
+
+Para escalar um veículo, a rota exige cadastro ativo, não bloqueado, da mesma empresa e transportadora. A disponibilidade e a aprovação por filial do veículo não limitam a atribuição em rotas.
 
 Quando a aprovação é ligada, `new_only` afeta apenas novos vínculos; `review_existing` coloca os vínculos ativos existentes como `pending`. Desligar a exigência não altera `active`, `blocked` nem cadastros rejeitados.
 

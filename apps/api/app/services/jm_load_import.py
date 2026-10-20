@@ -74,7 +74,10 @@ def _rows(sheet) -> list[dict]:
     return [dict(zip(headers, row)) for row in iterator if any(value not in (None, "") for value in row)]
 
 
-def build_jm_template_xlsx(carriers: list[tuple[int, str]] | None = None) -> io.BytesIO:
+def build_jm_template_xlsx(
+    carriers: list[tuple[int, str]] | None = None,
+    branches: list[tuple[int, str]] | None = None,
+) -> io.BytesIO:
     """Gera o modelo único usado pela Adimax e pelas transportadoras."""
     workbook = openpyxl.Workbook()
     detail = workbook.active
@@ -96,7 +99,7 @@ def build_jm_template_xlsx(carriers: list[tuple[int, str]] | None = None) -> io.
     instructions.append(["Número do pedido", "Também pode ser informado como Número ou Número pedido."])
     instructions.append(["Modelo único", "Este mesmo arquivo atende a administração Adimax e o portal da transportadora."])
     instructions.append(["Transportadora", "No acesso Adimax, preencha o ID e o nome como aparecem na aba Transportadoras. No portal da transportadora, a empresa do login é aplicada automaticamente."])
-    instructions.append(["Filial", "A unidade selecionada no sistema define onde as rotas serão importadas; a coluna Filial é apenas informativa."])
+    instructions.append(["Filial", "Obrigatória. O nome informado direciona automaticamente cada carga para a unidade correspondente; consulte a aba Filiais."])
     instructions.append(["Detalhes da carga", "Uma linha por entrega. Sequência, Nº Carga e pedido são obrigatórios."])
     instructions.append(["Notas e datas", "Use o mesmo pedido da primeira aba para atualizar NF e datas, inclusive retroativamente."])
     for sheet in (detail, fiscal, instructions):
@@ -113,6 +116,13 @@ def build_jm_template_xlsx(carriers: list[tuple[int, str]] | None = None) -> io.
         "H": 16, "N": 21, "O": 25, "P": 28,
     }.items():
         detail.column_dimensions[column].width = width
+    branch_reference = workbook.create_sheet("Filiais")
+    branch_reference.append(["ID FILIAL", "FILIAL"])
+    for branch_id, branch_name in branches or []:
+        branch_reference.append([branch_id, branch_name])
+    for cell in branch_reference[1]:
+        cell.font = Font(bold=True); cell.fill = PatternFill("solid", fgColor="F9A61A")
+    branch_reference.column_dimensions["A"].width = 16; branch_reference.column_dimensions["B"].width = 42
     reference = workbook.create_sheet("Transportadoras")
     reference.append(["ID TRANSPORTADORA", "TRANSPORTADORA"])
     for carrier_id, carrier_name in carriers or []:
@@ -142,8 +152,9 @@ def is_jm_load_workbook(source) -> bool:
 
 def import_jm_loads(
     source,
-    branch_id: int,
+    branch_id: int | None = None,
     *,
+    allowed_branch_ids: set[int] | None = None,
     confirmed: bool = False,
     user_id: int | None = None,
     forced_carrier_id: int | None = None,
@@ -161,21 +172,51 @@ def import_jm_loads(
     stats = {"rows_read": len(detail_rows), "routes_created": 0, "routes_updated": 0,
              "stops_created": 0, "stops_updated": 0, "routes_optimized": 0,
              "routing_errors": 0, "carrier_pending": 0, "route_ids": [], "errors": []}
-    groups: dict[str, list[dict]] = {}
+    groups: dict[tuple[str, str], list[dict]] = {}
+    branch_labels: dict[str, str] = {}
     for index, row in enumerate(detail_rows, 2):
         load = _text(row.get("Nº CARGA"))
         order = _text(row.get("NUMERO PEDIDO"))
+        branch_label = _text(row.get("FILIAL"))
         if not load or not order:
             stats["errors"].append(f"Linha {index}: Nº Carga ou Número pedido vazio — ignorada.")
             continue
-        groups.setdefault(load, []).append(row)
+        if branch_label:
+            branch_key = _header(branch_label)
+            branch_labels[branch_key] = branch_label
+        elif branch_id is not None:
+            # Compatibilidade com integrações antigas que ainda enviam a filial
+            # explicitamente. O fluxo atual da interface nunca usa este atalho.
+            branch_key = f"__BRANCH_ID_{branch_id}"
+            branch_labels[branch_key] = str(branch_id)
+        else:
+            raise RuntimeError(f"Linha {index}: Filial é obrigatória para direcionar a carga {load}.")
+        groups.setdefault((branch_key, load), []).append(row)
 
     with SessionLocal() as db:
-        branch = db.get(Branch, branch_id)
-        if branch is None:
-            raise RuntimeError("Filial não encontrada.")
+        allowed_branch_ids = set(allowed_branch_ids or ())
+        if branch_id is not None:
+            allowed_branch_ids.add(branch_id)
+        if not allowed_branch_ids:
+            raise RuntimeError("Nenhuma filial ativa disponível para importação.")
+        available_branches = db.scalars(select(Branch).where(
+            Branch.id.in_(allowed_branch_ids),
+            Branch.active.is_(True),
+        )).all()
+        branches_by_name: dict[str, list[Branch]] = {}
+        for available_branch in available_branches:
+            branches_by_name.setdefault(_header(available_branch.name), []).append(available_branch)
+            branches_by_name[f"__BRANCH_ID_{available_branch.id}"] = [available_branch]
         changes = []
-        for load, rows in groups.items():
+        for (branch_key, load), rows in groups.items():
+            matches = branches_by_name.get(branch_key, [])
+            branch_label = branch_labels[branch_key]
+            if not matches:
+                raise RuntimeError(f"Filial '{branch_label}' não encontrada, inativa ou fora do acesso do usuário.")
+            if len(matches) > 1:
+                raise RuntimeError(f"Filial '{branch_label}' é ambígua. Renomeie as unidades para nomes únicos.")
+            branch = matches[0]
+            branch_id = branch.id
             first_meta = next((metadata.get(_text(row.get("NUMERO PEDIDO"))) for row in rows if metadata.get(_text(row.get("NUMERO PEDIDO")))), {})
             planned_date = _date(first_meta.get("DATA PREV. ENTREGA")) or _date(first_meta.get("DATA EMISSAO NFE")) or date.today()
             route = db.scalar(select(Route).where(Route.branch_id == branch_id, Route.codigo_ut == load))

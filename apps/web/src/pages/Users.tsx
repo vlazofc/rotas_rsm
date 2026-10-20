@@ -38,10 +38,10 @@ const DEPARTMENTS = ["Operação", "Torre de controle", "Frota", "Cadastros", "D
 const ROLE_ORDER = [
   "admin_global",
   "auditor",
-  "gerente",
+  "gestor_brasil",
   "motorista",
   "operador_logistico",
-  "monitoramento",
+  "torre_controle",
 ];
 
 export default function Users() {
@@ -51,6 +51,7 @@ export default function Users() {
   const [usersLoading, setUsersLoading] = useState(true);
   const [usersLoadError, setUsersLoadError] = useState("");
   const [roles, setRoles] = useState<RoleOption[]>([]);
+  const [rolesLoadError, setRolesLoadError] = useState("");
   const [editing, setEditing] = useState<"new" | number | null>(null);
   const [form, setForm] = useState({ ...EMPTY });
   const [error, setError] = useState("");
@@ -87,8 +88,12 @@ export default function Users() {
     reloadMasters();
     api.get<CarrierOption[]>("/carriers?only_active=true").then(r=>setCarriers(r.data)).catch(()=>setCarriers([]));
     api.get("/users/roles")
-      .then((r) => setRoles(orderRoles(r.data)))
-      .catch(() => setRoles(orderRoles(ROLE_ORDER.map((value) => ({ value, description: "" })))));
+      .then((r) => {
+        if (!Array.isArray(r.data)) throw new Error("Resposta inválida ao consultar perfis.");
+        setRoles(orderRoles(r.data));
+        setRolesLoadError("");
+      })
+      .catch(() => setRolesLoadError("Não foi possível carregar os perfis. Recarregue a página."));
     api.get("/branches").then(r=>setBranches(r.data)).catch(()=>setBranches([]));
   }, []);
 
@@ -120,7 +125,8 @@ export default function Users() {
 
   function startNew() {
     setError("");
-    setForm({ ...EMPTY, role: section === "drivers" ? "motorista" : section === "masters" ? "gestor_brasil" : "planejamento", department:section === "masters" ? "Transportadora" : "" });
+    const defaultRole = roles.some(role => role.value === "operador_logistico") ? "operador_logistico" : "";
+    setForm({ ...EMPTY, role: section === "drivers" ? "motorista" : section === "masters" ? "gestor_brasil" : defaultRole, department:section === "masters" ? "Transportadora" : "" });
     setEditing("new");
   }
 
@@ -134,6 +140,10 @@ export default function Users() {
   async function save(e: React.FormEvent) {
     e.preventDefault();
     if (saving) return;
+    if (section === "internal" && !roles.some(role => role.value === form.role)) {
+      setError("Selecione um perfil ativo antes de salvar.");
+      return;
+    }
     if(section==="masters"&&!form.carrier_id){setError("Selecione a transportadora do usuário master.");return}
     setSaving(true);
     setError("");
@@ -225,6 +235,7 @@ export default function Users() {
       </div>
 
       {error && <p style={{ color: "#c00" }}>{error}</p>}
+      {rolesLoadError && <p role="alert" style={{ color: "#c00" }}>{rolesLoadError}</p>}
       {usersLoadError && <p role="alert" style={{ color: "#c00" }}>{usersLoadError} <button type="button" className="btn-mini" style={mini} onClick={() => void reload()}>Tentar novamente</button></p>}
 
       {me?.role === "admin_global" && operationalSettings && (
@@ -315,8 +326,9 @@ export default function Users() {
             </label>}
             {section === "internal" && <label style={field}>
               <span>{t("users.role")}</span>
-              <select style={input} value={form.role}
+              <select style={input} required value={roles.some(role => role.value === form.role) ? form.role : ""}
                 onChange={(e) => setForm({ ...form, role: e.target.value })}>
+                <option value="" disabled>Selecione um perfil ativo</option>
                 {roles.map((r) => (
                   <option key={r.value} value={r.value}>{roleLabel(r.value)}</option>
                 ))}

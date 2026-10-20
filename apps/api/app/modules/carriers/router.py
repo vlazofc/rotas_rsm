@@ -8,6 +8,7 @@ from app.core.permissions import Role, require_internal_permission, require_inte
 from app.db.models import Carrier, CarrierUser, CarrierVehicleLink, Driver, Route, Tenant, User, Vehicle
 from app.db.session import get_db
 from app.modules.auth.deps import get_current_user
+from app.modules.vehicles.router import _sync_vehicle_branches
 from app.services.audit import log, log_update, snapshot
 from app.services.documents import normalize_document
 
@@ -79,15 +80,12 @@ def _validate(data: CarrierData, current: Carrier | None = None) -> None:
     kind = data.kind or (current.kind if current else None)
     person_type = data.person_type or (current.person_type if current else None)
     document = data.document if data.document is not None else (current.document if current else None)
-    antt = data.antt_number if data.antt_number is not None else (current.antt_number if current else None)
     if kind not in {"arrendatario", "beneficiario"}: raise HTTPException(422, detail="Tipo de responsável inválido.")
     if person_type not in {"pessoa_fisica", "pessoa_juridica"}: raise HTTPException(422, detail="Selecione CPF ou CNPJ.")
     digits = "".join(filter(str.isdigit, document or "")); expected = 11 if person_type == "pessoa_fisica" else 14
     # Cadastros antigos podem estar sem documento; uma simples ativação não deve ser bloqueada.
     if (current is None or data.document is not None or data.person_type is not None) and len(digits) != expected:
         raise HTTPException(422, detail=f"Informe um {'CPF' if expected == 11 else 'CNPJ'} com {expected} dígitos.")
-    if data.vehicle_ids and not (antt or "").strip():
-        raise HTTPException(422, detail="Informe a ANTT/RNTRC para liberar o responsável nas placas selecionadas.")
 
 def _ensure_unique_document(db: Session, document: str | None, current_id: int | None = None) -> str | None:
     if document is None:
@@ -118,13 +116,14 @@ def _sync_vehicles(db: Session, carrier: Carrier, vehicle_ids: list[int], actor:
     db.flush()
     for vehicle in vehicles:
         beneficiary = carrier.kind == "beneficiario"
-        db.add(CarrierVehicleLink(carrier_id=carrier.id, vehicle_id=vehicle.id, antt_authorized=True, freight_beneficiary=beneficiary))
+        db.add(CarrierVehicleLink(carrier_id=carrier.id, vehicle_id=vehicle.id, antt_authorized=bool((vehicle.antt_number or "").strip() and (carrier.antt_number or "").strip()), freight_beneficiary=beneficiary))
         vehicle.carrier_id = carrier.id
         vehicle.freight_receiver_type = "terceiro"
+        _sync_vehicle_branches(db, vehicle)
     for vehicle in db.scalars(select(Vehicle).where(Vehicle.carrier_id == carrier.id, Vehicle.id.not_in(ids))).all():
         vehicle.carrier_id = None
         vehicle.freight_receiver_type = "proprietario"
-    if old_ids != ids: log(db, user_id=actor.id, action="update", entity="carrier_vehicle_link", entity_id=carrier.id, detail=f'vehicle_ids: "{old_ids}" -> "{ids}"; antt_authorized: "Sim"')
+    if old_ids != ids: log(db, user_id=actor.id, action="update", entity="carrier_vehicle_link", entity_id=carrier.id, detail=f'vehicle_ids: "{old_ids}" -> "{ids}"')
 
 @router.get("", response_model=list[CarrierOut])
 def list_carriers(only_active: bool = False, tenant_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -162,6 +161,11 @@ def update_carrier(carrier_id: int, data: CarrierData, db: Session = Depends(get
     if "document" in updates: updates["document"] = _ensure_unique_document(db, updates["document"], carrier.id)
     for field, value in updates.items(): setattr(carrier, field, value)
     if data.vehicle_ids is not None: _sync_vehicles(db, carrier, data.vehicle_ids, actor)
+    if "antt_number" in updates:
+        for vehicle in db.scalars(select(Vehicle).where(Vehicle.carrier_id == carrier.id)).all():
+            _sync_vehicle_branches(db, vehicle)
+            for link in db.scalars(select(CarrierVehicleLink).where(CarrierVehicleLink.vehicle_id == vehicle.id, CarrierVehicleLink.carrier_id == carrier.id)).all():
+                link.antt_authorized = bool((vehicle.antt_number or "").strip() and (carrier.antt_number or "").strip())
     log_update(db, user_id=actor.id, entity="carrier", entity_id=carrier.id, before=before, obj=carrier, updates=updates)
     db.commit(); db.refresh(carrier); return _out(db, carrier)
 
