@@ -1,7 +1,7 @@
 from datetime import date
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -12,9 +12,11 @@ from app.db.models import (
 )
 from app.db.session import Base
 from app.modules.notifications.router import _tenant_rows
+from app.modules.drivers.router import _validate_linked_user
 from app.modules.routes.router import _require_route_editor, assign_route
 from app.modules.routes.schemas import RouteAssignmentIn
-from app.modules.users.router import _guard_carrier_assignment
+from app.modules.users.router import _guard_carrier_assignment, UserUpdate, change_user_status, list_users, reset_password, update_user
+from app.services.entity_status import StatusChangeIn
 from app.modules.vehicles.router import list_owners, list_requests
 
 
@@ -63,6 +65,46 @@ def test_carrier_master_cannot_assign_privileged_role_or_custom_permissions(carr
     with pytest.raises(HTTPException) as permission_error:
         _guard_carrier_assignment(membership, "operador_logistico", ["finance.view"])
     assert permission_error.value.status_code == 403
+
+
+def test_carrier_master_manages_legacy_driver_access_only_for_own_carrier(carrier_scope):
+    db, master, membership, *_ = carrier_scope
+    own = User(name="Motorista Alfa", email="alfa@acesso.adimax.com.br", login="motorista.alfa",
+               role="motorista", tenant_id=master.tenant_id, branch_id=master.branch_id)
+    other = User(name="Motorista Beta", email="beta@acesso.adimax.com.br", login="motorista.beta",
+                 role="motorista", tenant_id=master.tenant_id, branch_id=master.branch_id)
+    db.add_all([own, other]); db.flush()
+    db.add_all([
+        Driver(name=own.name, tenant_id=master.tenant_id, branch_id=master.branch_id,
+               carrier_id=membership.carrier_id, user_id=own.id),
+        Driver(name=other.name, tenant_id=master.tenant_id, branch_id=master.branch_id,
+               carrier_id=membership.carrier_id + 1, user_id=other.id),
+    ])
+    db.commit()
+
+    listed = list_users(db=db, actor=master)
+    assert own.id in {user.id for user in listed}
+    assert other.id not in {user.id for user in listed}
+    assert next(user for user in listed if user.id == own.id).carrier_id == membership.carrier_id
+
+    assert update_user(own.id, UserUpdate(login="novo.alfa"), db=db, actor=master).login == "novo.alfa"
+    assert reset_password(own.id, Response(), db=db, actor=master).must_change_password
+    assert not change_user_status(own.id, StatusChangeIn(action="deactivate", reason="Teste de acesso"), db=db, actor=master).active
+    for action in (
+        lambda: update_user(other.id, UserUpdate(login="novo.beta"), db=db, actor=master),
+        lambda: reset_password(other.id, Response(), db=db, actor=master),
+        lambda: change_user_status(other.id, StatusChangeIn(action="deactivate", reason="Teste de acesso"), db=db, actor=master),
+    ):
+        with pytest.raises(HTTPException) as denied:
+            action()
+        assert denied.value.status_code == 403
+
+    db.add(CarrierUser(carrier_id=membership.carrier_id + 1, user_id=own.id, active=True))
+    db.commit()
+    assert own.id not in {user.id for user in list_users(db=db, actor=master)}
+    with pytest.raises(HTTPException) as denied_link:
+        _validate_linked_user(db, own.id, master.tenant_id, carrier_id=membership.carrier_id)
+    assert denied_link.value.status_code == 403
 
 
 def test_live_alert_source_is_scoped_to_carrier(carrier_scope):

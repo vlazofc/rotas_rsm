@@ -144,7 +144,7 @@ def _sync_branches(db:Session,driver:Driver,_branch_ids:list[int],_actor:User)->
         approval_status="pending" if policies.get(branch_id) and policies[branch_id].require_driver_approval else "approved",
     ) for branch_id in ids])
 
-def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | None, *, driver_id: int | None = None) -> None:
+def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | None, *, driver_id: int | None = None, carrier_id: int | None = None) -> None:
     if user_id is None:
         return
     linked_user = db.get(User, user_id)
@@ -152,6 +152,10 @@ def _validate_linked_user(db: Session, user_id: int | None, tenant_id: int | Non
         raise HTTPException(status_code=422, detail="Usuário não pertence à empresa do motorista.")
     if linked_user.role != Role.MOTORISTA.value:
         raise HTTPException(status_code=422, detail="Selecione um usuário com perfil motorista.")
+    if carrier_id is not None:
+        membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == user_id, CarrierUser.active.is_(True)))
+        if membership is not None and membership.carrier_id != carrier_id:
+            raise HTTPException(status_code=403, detail="Usuário pertence a outra transportadora.")
     existing = db.scalar(select(Driver).where(Driver.user_id == user_id, Driver.id != (driver_id or -1)))
     if existing is not None:
         raise HTTPException(status_code=409, detail="Este acesso já está vinculado a outro motorista.")
@@ -202,7 +206,7 @@ def create_driver(data: DriverIn, db: Session = Depends(get_db), actor: User = D
         carrier = db.get(Carrier, data.carrier_id)
         if carrier is None or carrier.tenant_id != branch.tenant_id:
             raise HTTPException(status_code=422, detail="Transportadora não pertence à empresa da filial.")
-    _validate_linked_user(db, data.user_id, branch.tenant_id)
+    _validate_linked_user(db, data.user_id, branch.tenant_id, carrier_id=membership.carrier_id if membership else None)
     payload=data.model_dump(exclude={"branch_ids"})
     driver = Driver(tenant_id=branch.tenant_id, **payload)
     db.add(driver)
@@ -261,7 +265,7 @@ def update_driver(driver_id: int, data: DriverUpdate,
         if carrier is None or carrier.tenant_id != driver.tenant_id:
             raise HTTPException(status_code=422, detail="Transportadora não pertence à empresa do motorista.")
     if "user_id" in updates:
-        _validate_linked_user(db, data.user_id, driver.tenant_id, driver_id=driver.id)
+        _validate_linked_user(db, data.user_id, driver.tenant_id, driver_id=driver.id, carrier_id=membership.carrier_id if membership else None)
     before = snapshot(driver, list(updates))
     for field, value in updates.items():
         setattr(driver, field, value)

@@ -4,7 +4,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.permissions import Role, has_all_environment_access, require_branch_access, require_permission, require_roles, require_same_tenant
@@ -27,8 +27,27 @@ _CARRIER_ASSIGNABLE_ROLES = {
 
 def _guard_carrier_user(db: Session, actor: User, target_user_id: int) -> None:
     membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
-    if membership is not None and db.scalar(select(CarrierUser).where(CarrierUser.user_id == target_user_id, CarrierUser.carrier_id == membership.carrier_id, CarrierUser.active.is_(True))) is None:
+    if membership is not None and not db.scalar(select(User.id).where(
+        User.id == target_user_id,
+        _carrier_user_scope(membership.carrier_id),
+    )):
         raise HTTPException(403, "Usuário não pertence à sua transportadora.")
+
+
+def _carrier_user_scope(carrier_id: int):
+    """Inclui contas antigas vinculadas ao motorista, mas sem CarrierUser."""
+    own_membership = select(CarrierUser.id).where(
+        CarrierUser.user_id == User.id,
+        CarrierUser.carrier_id == carrier_id,
+        CarrierUser.active.is_(True),
+    ).exists()
+    any_membership = select(CarrierUser.id).where(
+        CarrierUser.user_id == User.id, CarrierUser.active.is_(True),
+    ).exists()
+    own_driver = select(Driver.id).where(
+        Driver.user_id == User.id, Driver.carrier_id == carrier_id,
+    ).exists()
+    return or_(own_membership, (~any_membership & (User.role == Role.MOTORISTA.value) & own_driver))
 
 def _guard_carrier_assignment(membership: CarrierUser | None, role: str | None, permissions: list[str] | None) -> None:
     if membership is None:
@@ -273,7 +292,7 @@ def list_users(db: Session = Depends(get_db), actor: User = Depends(get_current_
     stmt = select(User).order_by(User.name)
     membership = db.scalar(select(CarrierUser).where(CarrierUser.user_id == actor.id, CarrierUser.active.is_(True)))
     if membership is not None:
-        stmt = stmt.join(CarrierUser, CarrierUser.user_id == User.id).where(CarrierUser.carrier_id == membership.carrier_id, CarrierUser.active.is_(True))
+        stmt = stmt.where(_carrier_user_scope(membership.carrier_id))
     elif not has_all_environment_access(actor):
         stmt = stmt.where(User.tenant_id == actor.tenant_id)
     rows = db.scalars(stmt).all()
@@ -285,6 +304,11 @@ def list_users(db: Session = Depends(get_db), actor: User = Depends(get_current_
             .where(CarrierUser.active.is_(True), CarrierUser.user_id.in_([row.id for row in rows]))
         ).all()
     } if rows else {}
+    if membership is not None:
+        carrier = db.get(Carrier, membership.carrier_id)
+        for row in rows:
+            if row.id not in memberships:
+                memberships[row.id] = (membership.carrier_id, carrier.name if carrier else None)
     return [_user_out(row, *(memberships.get(row.id, (None, None)))) for row in rows if not (
         row.email.startswith("preview@")
         and row.email.endswith((".admmendes.internal", ".jm.internal"))
